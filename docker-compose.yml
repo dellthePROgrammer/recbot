@@ -1,0 +1,57 @@
+version: '3.8'
+services:
+  traefik:
+    image: "traefik:v3.5"
+    container_name: "traefik"
+    command: 
+      - "--providers.docker=true"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.letsencrypt.acme.email=your-email-here"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "443:443"
+    environment:
+      - CLOUDFLARE_EMAIL=your-cloudflare-email-here
+      - CLOUDFLARE_DNS_API_TOKEN=your-dns-api-token-here
+      - CLOUDFLARE_ZONE_API_TOKEN=your-zone-api-token-here
+    volumes:
+      - "./letsencrypt:/letsencrypt"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+  recbot:
+    image: ghostreaper69/recbot:v0.1.65
+    container_name: "recbot"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.recbot.rule=Host(`your-domain-here`)
+      - traefik.http.routers.recbot.entrypoints=websecure
+      - traefik.http.routers.recbot.tls.certresolver=letsencrypt
+      - traefik.http.services.recbot.loadbalancer.server.port=4000
+    ports:
+      #- "4000:4000"
+      #- "2222:2222"
+    environment:
+      - STORAGE_TYPE=aws
+      - AWS_ACCESS_KEY_ID=your-aws-access-key-id-here
+      - AWS_SECRET_ACCESS_KEY=your-aws-secret-access-key-here
+      - AWS_REGION=your-aws-region-here
+      - AWS_BUCKET=your-aws-bucket-name-here
+      #- B2_ACCOUNT=your_b2_key_id
+      #- B2_KEY=your_b2_key
+      #- B2_BUCKET=your_b2_bucket_name
+      - ENABLE_SFTP=false
+      #- SFTP_USER=root
+      #- SFTP_PASS=your_sftp_password_here
+      - WAV_DIR=/data/wav
+    restart: unless-stopped
+    cap_add:
+      - SYS_ADMIN  # Required for FUSE
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined  # Required for FUSE on some systems
+    # Uncomment to persist logs or mount local folders if needed
+    # volumes:
+    #   - ./local_wav:/data/wav
+    #   - ./logs:/var/log
