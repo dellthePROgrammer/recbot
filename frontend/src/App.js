@@ -255,7 +255,11 @@ function App() {
       <Container maxWidth="md" sx={{ mt: 4 }}>
         <Paper elevation={3} sx={{ p: 3 }}>
           <Box display="flex" alignItems="center" justifyContent="space-between">
-            <img src="/ColorLogo.svg" alt="RecBot Logo" style={{ height: 96 }} />
+            <img
+              src={darkMode ? "/brandingO365.png" : "/ColorLogo.svg"}
+              alt="RecBot Logo"
+              style={{ height: 96 }}
+            />
             <Box display="flex" alignItems="center">
               <FormControlLabel
                 control={
