@@ -21,7 +21,7 @@ FROM node:18-slim
 
 
 # Install rclone for Backblaze B2 mounting
-RUN apt-get update && apt-get install -y curl fuse3 ffmpeg s3fs python3 cron \
+RUN apt-get update && apt-get install -y curl fuse3 ffmpeg s3fs \
 	&& curl -O https://downloads.rclone.org/rclone-current-linux-amd64.deb \
 	&& dpkg -i rclone-current-linux-amd64.deb \
 	&& rm rclone-current-linux-amd64.deb \

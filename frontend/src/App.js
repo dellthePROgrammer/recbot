@@ -19,6 +19,11 @@ import {
   Switch,
   FormControlLabel,
   CssBaseline,
+  Select,
+  MenuItem,
+  CircularProgress,
+  FormControl,
+  InputLabel,
 } from "@mui/material";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -28,14 +33,11 @@ import { DatePicker } from "@mui/x-date-pickers/DatePicker";
 import { TimePicker } from "@mui/x-date-pickers/TimePicker";
 import dayjs from "dayjs";
 import { ThemeProvider, createTheme } from "@mui/material/styles";
-import Select from "@mui/material/Select";
-import MenuItem from "@mui/material/MenuItem";
-import CircularProgress from "@mui/material/CircularProgress";
-import FormControl from "@mui/material/FormControl";
-import InputLabel from "@mui/material/InputLabel";
 
 function parseFileInfo(file) {
-  const [folder, filename] = file.split('/');
+  const cleanFile = file.startsWith('recordings/') ? file.slice('recordings/'.length) : file;
+  const [folder, filename] = cleanFile.split('/');
+  if (!folder || !filename) return { file, date: '', phone: '', email: '', time: '', durationMs: 0 };
   const date = folder.replace(/_/g, '/');
   const phoneMatch = filename.match(/^(\d+)/);
   const phone = phoneMatch ? phoneMatch[1] : '';
@@ -69,12 +71,10 @@ function App() {
   const [sortDirection, setSortDirection] = useState("asc");
   const [darkMode, setDarkMode] = useState(false);
   const [durationMin, setDurationMin] = useState("");
-  const [durationMode, setDurationMode] = useState("min"); // "min" or "max"
-  const [timeMode, setTimeMode] = useState("range"); // "range", "Older", or "Newer"
+  const [durationMode, setDurationMode] = useState("min");
+  const [timeMode, setTimeMode] = useState("range");
   const [error500, setError500] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [totalFiles, setTotalFiles] = useState(0);
-  const [pageCount, setPageCount] = useState(1);
   const [filesPerPage, setFilesPerPage] = useState(25);
 
   const theme = createTheme({
@@ -83,40 +83,24 @@ function App() {
     },
   });
 
-  // Fetch files only when a date is selected
-  const fetchFiles = (
-    start,
-    end,
-    pageNum = 1,
-    pageSize = filesPerPage,
-    phone = phoneFilter,
-    email = emailFilter,
-    duration = durationMin,
-    durationModeParam = durationMode
-  ) => {
+  // Fetch files only when a date is selected or changed
+  const fetchFiles = (start, end) => {
     if (!start) return;
     setLoading(true);
     setError500(false);
-    let url = `/api/wav-files?dateStart=${encodeURIComponent(dayjs(start).format("M_D_YYYY"))}&page=${pageNum}&pageSize=${pageSize}`;
+    let url = `/api/wav-files?dateStart=${encodeURIComponent(dayjs(start).format("M_D_YYYY"))}`;
     if (end) url += `&dateEnd=${encodeURIComponent(dayjs(end).format("M_D_YYYY"))}`;
-    if (phone) url += `&phone=${encodeURIComponent(phone)}`;
-    if (email) url += `&email=${encodeURIComponent(email)}`;
-    if (duration) url += `&duration=${encodeURIComponent(duration)}&durationMode=${durationModeParam}`;
     fetch(url)
       .then((res) => {
         if (res.status === 500) {
           setError500(true);
           setLoading(false);
-          return { files: [] };
+          return [];
         }
         return res.json();
       })
       .then((data) => {
-        setFiles(Array.isArray(data.files) ? data.files : []);
-        setTotalFiles(data.total || 0);
-        const calculatedPageCount = Math.max(1, Math.ceil((data.total || 0) / filesPerPage));
-        setPageCount(calculatedPageCount);
-        if (page > calculatedPageCount) setPage(1);
+        setFiles(Array.isArray(data) ? data : []);
         setLoading(false);
       })
       .catch(() => {
@@ -126,29 +110,20 @@ function App() {
       });
   };
 
-  // When the user selects a date or date range, or changes filesPerPage, fetch files
   useEffect(() => {
     if (calendarDateStart) {
-      fetchFiles(calendarDateStart, calendarDateEnd, 1, filesPerPage, phoneFilter, emailFilter, durationMin, durationMode);
+      fetchFiles(calendarDateStart, calendarDateEnd);
       setPage(1);
     }
     // eslint-disable-next-line
-  }, [calendarDateStart, calendarDateEnd, filesPerPage, phoneFilter, emailFilter, durationMin, durationMode]);
-
-  // When the user changes page, fetch that page
-  useEffect(() => {
-    if (calendarDateStart) {
-      fetchFiles(calendarDateStart, calendarDateEnd, page, filesPerPage);
-    }
-    // eslint-disable-next-line
-  }, [page]);
+  }, [calendarDateStart, calendarDateEnd]);
 
   const playFile = (file) => {
     const encodedPath = file.split('/').map(encodeURIComponent).join('/');
     setPlaying(`/api/wav-files/${encodedPath}`);
   };
 
-  // Filter files by column filters
+  // Filtering
   const filteredFiles = files.filter((file) => {
     const info = parseFileInfo(file);
 
@@ -158,27 +133,32 @@ function App() {
       const fileDate = dayjs(info.date, "M/D/YYYY");
       dateMatch =
         fileDate.isValid() &&
-        !fileDate.isBefore(dayjs(calendarDateStart)) &&
-        !fileDate.isAfter(dayjs(calendarDateEnd));
+        !fileDate.isBefore(dayjs(calendarDateStart).startOf("day")) &&
+        !fileDate.isAfter(dayjs(calendarDateEnd).endOf("day"));
     } else if (calendarDateStart) {
       const fileDate = dayjs(info.date, "M/D/YYYY");
-      dateMatch = fileDate.isValid() && fileDate.isSame(dayjs(calendarDateStart), "day");
+      dateMatch =
+        fileDate.isValid() &&
+        fileDate.isSame(dayjs(calendarDateStart), "day");
     }
 
     // Time filter logic
     let timeMatch = true;
-    const fileTime = dayjs(info.time, "hh:mm:ss A");
-    if (timeMode === "range" && timePickerStart && timePickerEnd) {
-      timeMatch =
-        fileTime.isValid() &&
-        !fileTime.isBefore(dayjs(timePickerStart)) &&
-        !fileTime.isAfter(dayjs(timePickerEnd));
-    } else if (timeMode === "Older" && timePickerStart) {
-      // Older: fileTime <= selected time
-      timeMatch = fileTime.isValid() && !fileTime.isAfter(dayjs(timePickerStart));
-    } else if (timeMode === "Newer" && timePickerStart) {
-      // Newer: fileTime >= selected time
-      timeMatch = fileTime.isValid() && !fileTime.isBefore(dayjs(timePickerStart));
+    if (info.time) {
+      const fileTime = dayjs(info.time, "hh:mm:ss A");
+      const startTime = timePickerStart ? dayjs(timePickerStart, "hh:mm:ss A") : null;
+      const endTime = timePickerEnd ? dayjs(timePickerEnd, "hh:mm:ss A") : null;
+
+      if (timeMode === "range" && startTime && endTime) {
+        timeMatch =
+          fileTime.isValid() &&
+          !fileTime.isBefore(startTime) &&
+          !fileTime.isAfter(endTime);
+      } else if (timeMode === "Older" && startTime) {
+        timeMatch = fileTime.isValid() && !fileTime.isAfter(startTime);
+      } else if (timeMode === "Newer" && startTime) {
+        timeMatch = fileTime.isValid() && !fileTime.isBefore(startTime);
+      }
     }
 
     // Duration filter logic (min or max)
@@ -191,17 +171,30 @@ function App() {
         durationMatch = durationSec <= Number(durationMin);
       }
     }
+
+    // Phone filter (partial match, ignore empty)
+    let phoneMatch = true;
+    if (phoneFilter.trim() !== "") {
+      phoneMatch = info.phone.toLowerCase().includes(phoneFilter.toLowerCase());
+    }
+
+    // Email filter (partial match, ignore empty)
+    let emailMatch = true;
+    if (emailFilter.trim() !== "") {
+      emailMatch = info.email.toLowerCase().includes(emailFilter.toLowerCase());
+    }
+
     return (
       dateMatch &&
       timeMatch &&
-      info.phone.toLowerCase().includes(phoneFilter.toLowerCase()) &&
-      info.email.toLowerCase().includes(emailFilter.toLowerCase()) &&
+      phoneMatch &&
+      emailMatch &&
       durationMatch
     );
   });
 
-  // Sort filtered files
-  const sortedFiles = [...files].sort((a, b) => {
+  // Sorting
+  const sortedFiles = [...filteredFiles].sort((a, b) => {
     const infoA = parseFileInfo(a);
     const infoB = parseFileInfo(b);
     let valA = infoA[sortColumn];
@@ -211,7 +204,6 @@ function App() {
       valA = Number(valA);
       valB = Number(valB);
     } else if (sortColumn === "time") {
-      // Parse time strings to dayjs objects for comparison
       const timeA = dayjs(valA, "hh:mm:ss A");
       const timeB = dayjs(valB, "hh:mm:ss A");
       if (timeA.isValid() && timeB.isValid()) {
@@ -219,7 +211,6 @@ function App() {
         if (timeA.isAfter(timeB)) return sortDirection === "asc" ? 1 : -1;
         return 0;
       }
-      // Fallback to string comparison if invalid
       valA = valA || "";
       valB = valB || "";
     } else {
@@ -232,33 +223,16 @@ function App() {
     return 0;
   });
 
-  // Use the backend's paginated files directly
-  const paginatedFiles = sortedFiles; // sortedFiles is just files sorted
+  // Pagination
+  const pageCount = Math.max(1, Math.ceil(sortedFiles.length / filesPerPage));
+  const paginatedFiles = sortedFiles.slice((page - 1) * filesPerPage, page * filesPerPage);
 
-  const handleDarkModeToggle = () => {
-    setDarkMode((prev) => !prev);
-  };
-
-  const handleCalendarDateStart = (newValue) => {
-    setCalendarDateStart(newValue);
-    setPage(1);
-  };
-
-  const handleCalendarDateEnd = (newValue) => {
-    setCalendarDateEnd(newValue);
-    setPage(1);
-  };
-
-  const handlePhoneFilter = (e) => {
-    setPhoneFilter(e.target.value);
-    setPage(1);
-  };
-
-  const handleEmailFilter = (e) => {
-    setEmailFilter(e.target.value);
-    setPage(1);
-  };
-
+  // Handlers
+  const handleDarkModeToggle = () => setDarkMode((prev) => !prev);
+  const handleCalendarDateStart = (newValue) => { setCalendarDateStart(newValue); setPage(1); };
+  const handleCalendarDateEnd = (newValue) => { setCalendarDateEnd(newValue); setPage(1); };
+  const handlePhoneFilter = (e) => { setPhoneFilter(e.target.value); setPage(1); };
+  const handleEmailFilter = (e) => { setEmailFilter(e.target.value); setPage(1); };
   const handleSort = (column) => {
     if (sortColumn === column) {
       setSortDirection(sortDirection === "asc" ? "desc" : "asc");
@@ -269,7 +243,6 @@ function App() {
     setPage(1);
   };
 
-  // When the filtered files change, adjust the page if necessary
   useEffect(() => {
     const maxPage = Math.max(1, Math.ceil(filteredFiles.length / filesPerPage));
     if (page > maxPage) setPage(1);
@@ -331,11 +304,7 @@ function App() {
               <LocalizationProvider dateAdapter={AdapterDayjs}>
                 <Box display="flex" alignItems="center">
                   <TimePicker
-                    label={
-                      timeMode === "range"
-                        ? "Start time"
-                        : timeMode
-                    }
+                    label={timeMode === "range" ? "Start time" : timeMode}
                     value={timePickerStart}
                     onChange={setTimePickerStart}
                     slotProps={{ textField: { size: "small", fullWidth: true } }}
@@ -391,9 +360,7 @@ function App() {
                 </Select>
               </Box>
             </Grid>
-            <Grid item xs={2}>
-              {/* Empty grid to keep layout aligned */}
-            </Grid>
+            <Grid item xs={2}></Grid>
             <Grid item xs={1}>
               <TextField
                 label="Phone"
@@ -415,7 +382,7 @@ function App() {
               />
             </Grid>
           </Grid>
-          {/* Add files per page selector */}
+          {/* Files per page selector */}
           <Box display="flex" justifyContent="flex-end" alignItems="center" mb={2}>
             <FormControl size="small" sx={{ minWidth: 120 }}>
               <InputLabel id="files-per-page-label">Files per page</InputLabel>
