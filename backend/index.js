@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
 import crypto from 'crypto';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat.js';
@@ -20,83 +20,21 @@ const CACHE_DIR = '/data/wav/cache';
 
 app.use(cors());
 
-app.get('/api/wav-files', (req, res) => {
-  try {
-    const { dateStart, dateEnd, phone, email, duration, durationMode = "min" } = req.query;
-    let foldersToScan = [];
-
-    if (dateStart && dateEnd) {
-      const start = dayjs(dateStart, "M_D_YYYY");
-      const end = dayjs(dateEnd, "M_D_YYYY");
-      let current = start.clone();
-      while (current.isSameOrBefore(end, "day")) {
-        foldersToScan.push(current.format("M_D_YYYY"));
-        current = current.add(1, "day");
+function getWavFilesFast(rootDir) {
+  return new Promise((resolve, reject) => {
+    execFile('./list_files', [rootDir], (error, stdout, stderr) => {
+      if (error) {
+        console.error('C++ scanner error:', stderr);
+        return reject(error);
       }
-    } else if (dateStart) {
-      foldersToScan = [dateStart];
-    } else {
-      foldersToScan = fs.existsSync(WAV_DIR)
-        ? fs.readdirSync(WAV_DIR).filter(f => {
-            try {
-              return fs.statSync(path.join(WAV_DIR, f)).isDirectory();
-            } catch {
-              return false;
-            }
-          })
-        : [];
-    }
-
-    let wavFiles = [];
-    for (const folder of foldersToScan) {
-      const folderPath = path.join(WAV_DIR, folder);
-      try {
-        if (fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
-          const files = fs.readdirSync(folderPath)
-            .filter(f => f.endsWith('.wav'))
-            .map(f => `${folder}/${f}`);
-          wavFiles.push(...files);
-        }
-      } catch (e) {
-        continue;
-      }
-    }
-
-    // Filtering by phone, email, duration
-    wavFiles = wavFiles.filter(file => {
-      const [folder, filename] = file.split('/');
-      const phoneMatch = filename.match(/^(\d+)/);
-      const filePhone = phoneMatch ? phoneMatch[1] : '';
-      const emailMatch = filename.match(/by ([^@]+@[^ ]+)/);
-      const fileEmail = emailMatch ? emailMatch[1] : '';
-      const durationMatch = filename.match(/_(\d+)\.wav$/);
-      const durationMs = durationMatch ? parseInt(durationMatch[1], 10) : 0;
-      const durationSec = Math.floor(durationMs / 1000);
-
-      let match = true;
-      if (phone) match = match && filePhone.includes(phone);
-      if (email) match = match && fileEmail.includes(email);
-      if (duration && !isNaN(duration)) {
-        if (durationMode === "min") match = match && durationSec >= Number(duration);
-        else match = match && durationSec <= Number(duration);
-      }
-      return match;
+      // Each line is folder/filename
+      const files = stdout.split('\n').filter(Boolean);
+      resolve(files);
     });
-
-    res.json(wavFiles);
-  } catch (err) {
-    console.error('Error in /api/wav-files:', err);
-    res.status(500).json([]);
-  }
-});
-
-function getCachePath(originalPath) {
-  // Use a hash of the original path for unique cache file names
-  const hash = crypto.createHash('md5').update(originalPath).digest('hex');
-  return path.join(CACHE_DIR, hash + '.wav');
+  });
 }
 
-// Stream a .wav file (support subdirectory path, with Range support for seeking)
+// Stream a .wav file (support subdirectory path, with Range support)
 app.get('/api/wav-files/*', (req, res) => {
   const relPath = decodeURIComponent(req.params[0]);
   const filePath = path.join(WAV_DIR, relPath);
@@ -180,6 +118,43 @@ app.get('/api/wav-files/*', (req, res) => {
     });
   });
 });
+
+app.get('/api/wav-files', async (req, res) => {
+  try {
+    const files = await getWavFilesFast(WAV_DIR);
+    // Filtering by phone, email, duration
+    wavFiles = files.filter(file => {
+      const [folder, filename] = file.split('/');
+      const phoneMatch = filename.match(/^(\d+)/);
+      const filePhone = phoneMatch ? phoneMatch[1] : '';
+      const emailMatch = filename.match(/by ([^@]+@[^ ]+)/);
+      const fileEmail = emailMatch ? emailMatch[1] : '';
+      const durationMatch = filename.match(/_(\d+)\.wav$/);
+      const durationMs = durationMatch ? parseInt(durationMatch[1], 10) : 0;
+      const durationSec = Math.floor(durationMs / 1000);
+
+      let match = true;
+      if (phone) match = match && filePhone.includes(phone);
+      if (email) match = match && fileEmail.includes(email);
+      if (duration && !isNaN(duration)) {
+        if (durationMode === "min") match = match && durationSec >= Number(duration);
+        else match = match && durationSec <= Number(duration);
+      }
+      return match;
+    });
+
+    res.json(wavFiles);
+  } catch (err) {
+    console.error('Error in /api/wav-files:', err);
+    res.status(500).json([]);
+  }
+});
+
+function getCachePath(originalPath) {
+  // Use a hash of the original path for unique cache file names
+  const hash = crypto.createHash('md5').update(originalPath).digest('hex');
+  return path.join(CACHE_DIR, hash + '.wav');
+}
 
 // Serve React static files
 const BUILD_DIR = path.join(process.cwd(), '../frontend/build');
