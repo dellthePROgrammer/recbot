@@ -83,39 +83,23 @@ function App() {
   });
 
   // Fetch files only when a date is selected
-  const fetchFiles = (
-    start,
-    end,
-    pageNum = 1,
-    pageSize = filesPerPage,
-    phone = phoneFilter,
-    email = emailFilter,
-    duration = durationMin,
-    durationModeParam = durationMode
-  ) => {
+  const fetchFiles = (start, end) => {
     if (!start) return;
     setLoading(true);
     setError500(false);
-    let url = `/api/wav-files?dateStart=${encodeURIComponent(dayjs(start).format("M_D_YYYY"))}&page=${pageNum}&pageSize=${pageSize}`;
+    let url = `/api/wav-files?dateStart=${encodeURIComponent(dayjs(start).format("M_D_YYYY"))}`;
     if (end) url += `&dateEnd=${encodeURIComponent(dayjs(end).format("M_D_YYYY"))}`;
-    if (phone) url += `&phone=${encodeURIComponent(phone)}`;
-    if (email) url += `&email=${encodeURIComponent(email)}`;
-    if (duration) url += `&duration=${encodeURIComponent(duration)}&durationMode=${durationModeParam}`;
     fetch(url)
       .then((res) => {
         if (res.status === 500) {
           setError500(true);
           setLoading(false);
-          return { files: [] };
+          return [];
         }
         return res.json();
       })
       .then((data) => {
-        setFiles(Array.isArray(data.files) ? data.files : []);
-        setTotalFiles(data.total || 0);
-        const calculatedPageCount = Math.max(1, Math.ceil((data.total || 0) / filesPerPage));
-        setPage(calculatedPageCount);
-        if (page > calculatedPageCount) setPage(1);
+        setFiles(Array.isArray(data) ? data : []);
         setLoading(false);
       })
       .catch(() => {
@@ -128,11 +112,11 @@ function App() {
   // When the user selects a date or date range, or changes filesPerPage, fetch files
   useEffect(() => {
     if (calendarDateStart) {
-      fetchFiles(calendarDateStart, calendarDateEnd, 1, filesPerPage, phoneFilter, emailFilter, durationMin, durationMode);
+      fetchFiles(calendarDateStart, calendarDateEnd);
       setPage(1);
     }
     // eslint-disable-next-line
-  }, [calendarDateStart, calendarDateEnd, filesPerPage, phoneFilter, emailFilter, durationMin, durationMode]);
+  }, [calendarDateStart, calendarDateEnd]);
 
   // When the user changes page, fetch that page
   useEffect(() => {
