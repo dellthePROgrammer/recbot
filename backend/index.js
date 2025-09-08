@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { spawn, execFile } from 'child_process';
+import { spawn } from 'child_process';
 import crypto from 'crypto';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat.js';
@@ -12,7 +12,7 @@ import fs from 'fs';
 import path from 'path';
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 4100;
 
 // Directory to scan for .wav files (can be mounted in Docker)
 const WAV_DIR = '/data/wav/recordings';
@@ -22,14 +22,28 @@ app.use(cors());
 
 function getWavFilesFast(rootDir) {
   return new Promise((resolve, reject) => {
-    execFile('./list_files', [rootDir], (error, stdout, stderr) => {
-      if (error) {
-        console.error('C++ scanner error:', stderr);
-        return reject(error);
-      }
-      // Each line is folder/filename
-      const files = stdout.split('\n').filter(Boolean);
+    const files = [];
+    const proc = spawn('./list_files', [rootDir]);
+    let leftover = '';
+
+    proc.stdout.on('data', (data) => {
+      const lines = (leftover + data.toString()).split('\n');
+      leftover = lines.pop();
+      files.push(...lines.filter(Boolean));
+    });
+
+    proc.stdout.on('end', () => {
+      if (leftover) files.push(leftover);
       resolve(files);
+    });
+
+    proc.stderr.on('data', (data) => {
+      console.error('C++ scanner error:', data.toString());
+    });
+
+    proc.on('error', (err) => reject(err));
+    proc.on('close', (code) => {
+      if (code !== 0) reject(new Error(`Scanner exited with code ${code}`));
     });
   });
 }
@@ -122,28 +136,7 @@ app.get('/api/wav-files/*', (req, res) => {
 app.get('/api/wav-files', async (req, res) => {
   try {
     const files = await getWavFilesFast(WAV_DIR);
-    // Filtering by phone, email, duration
-    wavFiles = files.filter(file => {
-      const [folder, filename] = file.split('/');
-      const phoneMatch = filename.match(/^(\d+)/);
-      const filePhone = phoneMatch ? phoneMatch[1] : '';
-      const emailMatch = filename.match(/by ([^@]+@[^ ]+)/);
-      const fileEmail = emailMatch ? emailMatch[1] : '';
-      const durationMatch = filename.match(/_(\d+)\.wav$/);
-      const durationMs = durationMatch ? parseInt(durationMatch[1], 10) : 0;
-      const durationSec = Math.floor(durationMs / 1000);
-
-      let match = true;
-      if (phone) match = match && filePhone.includes(phone);
-      if (email) match = match && fileEmail.includes(email);
-      if (duration && !isNaN(duration)) {
-        if (durationMode === "min") match = match && durationSec >= Number(duration);
-        else match = match && durationSec <= Number(duration);
-      }
-      return match;
-    });
-
-    res.json(wavFiles);
+    res.json(files);
   } catch (err) {
     console.error('Error in /api/wav-files:', err);
     res.status(500).json([]);
