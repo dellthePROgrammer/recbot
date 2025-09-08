@@ -74,7 +74,6 @@ function App() {
   const [error500, setError500] = useState(false);
   const [loading, setLoading] = useState(false);
   const [totalFiles, setTotalFiles] = useState(0);
-  const [pageCount, setPageCount] = useState(1);
   const [filesPerPage, setFilesPerPage] = useState(25);
 
   const theme = createTheme({
@@ -115,7 +114,7 @@ function App() {
         setFiles(Array.isArray(data.files) ? data.files : []);
         setTotalFiles(data.total || 0);
         const calculatedPageCount = Math.max(1, Math.ceil((data.total || 0) / filesPerPage));
-        setPageCount(calculatedPageCount);
+        setPage(calculatedPageCount);
         if (page > calculatedPageCount) setPage(1);
         setLoading(false);
       })
@@ -232,8 +231,8 @@ function App() {
     return 0;
   });
 
-  // Use the backend's paginated files directly
-  const paginatedFiles = sortedFiles; // sortedFiles is just files sorted
+  const pageCount = Math.max(1, Math.ceil(sortedFiles.length / filesPerPage));
+  const paginatedFiles = sortedFiles.slice((page - 1) * filesPerPage, page * filesPerPage);
 
   const handleDarkModeToggle = () => {
     setDarkMode((prev) => !prev);

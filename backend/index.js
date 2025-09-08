@@ -22,11 +22,10 @@ app.use(cors());
 
 app.get('/api/wav-files', (req, res) => {
   try {
-    const { dateStart, dateEnd, page = 1, pageSize = 100, phone, email, duration, durationMode = "min" } = req.query;
+    const { dateStart, dateEnd, phone, email, duration, durationMode = "min" } = req.query;
     let foldersToScan = [];
 
     if (dateStart && dateEnd) {
-      // Range: collect all date folders in the range
       const start = dayjs(dateStart, "M_D_YYYY");
       const end = dayjs(dateEnd, "M_D_YYYY");
       let current = start.clone();
@@ -37,8 +36,15 @@ app.get('/api/wav-files', (req, res) => {
     } else if (dateStart) {
       foldersToScan = [dateStart];
     } else {
-      // fallback: scan all folders (slow, but only if no date selected)
-      foldersToScan = fs.readdirSync(WAV_DIR).filter(f => fs.statSync(path.join(WAV_DIR, f)).isDirectory());
+      foldersToScan = fs.existsSync(WAV_DIR)
+        ? fs.readdirSync(WAV_DIR).filter(f => {
+            try {
+              return fs.statSync(path.join(WAV_DIR, f)).isDirectory();
+            } catch {
+              return false;
+            }
+          })
+        : [];
     }
 
     let wavFiles = [];
@@ -52,14 +58,12 @@ app.get('/api/wav-files', (req, res) => {
           wavFiles.push(...files);
         }
       } catch (e) {
-        // Ignore missing or inaccessible folders
         continue;
       }
     }
 
-    // Filtering
+    // Filtering by phone, email, duration
     wavFiles = wavFiles.filter(file => {
-      // Parse info
       const [folder, filename] = file.split('/');
       const phoneMatch = filename.match(/^(\d+)/);
       const filePhone = phoneMatch ? phoneMatch[1] : '';
@@ -79,24 +83,10 @@ app.get('/api/wav-files', (req, res) => {
       return match;
     });
 
-    // Pagination
-    const pageNum = parseInt(page, 10) || 1;
-    const size = parseInt(pageSize, 10) || 100;
-    const total = wavFiles.length;
-    const startIdx = (pageNum - 1) * size;
-    const endIdx = startIdx + size;
-    const filesPage = wavFiles.slice(startIdx, endIdx);
-
-    res.json({
-      files: filesPage,
-      total,
-      page: pageNum,
-      pageSize: size,
-      pageCount: Math.max(1, Math.ceil(total / size)),
-    });
+    res.json(wavFiles);
   } catch (err) {
     console.error('Error in /api/wav-files:', err);
-    res.status(500).json({ files: [], total: 0, page: 1, pageSize: 100, pageCount: 0 });
+    res.status(500).json([]);
   }
 });
 
