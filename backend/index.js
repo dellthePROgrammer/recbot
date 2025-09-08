@@ -5,137 +5,169 @@ import crypto from 'crypto';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat.js';
 import isSameOrBefore from 'dayjs/plugin/isSameOrBefore.js';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import {
+  S3Client,
+  ListObjectsV2Command,
+  GetObjectCommand,
+  PutObjectCommand,
+  HeadObjectCommand
+} from "@aws-sdk/client-s3";
+
 dayjs.extend(customParseFormat);
 dayjs.extend(isSameOrBefore);
 
-import fs from 'fs';
-import path from 'path';
-
 const app = express();
-const PORT = process.env.PORT || 4100;
-
-// Directory to scan for .wav files (can be mounted in Docker)
-const WAV_DIR = '/data/wav/recordings';
-const CACHE_DIR = '/data/wav/cache';
+const PORT = process.env.PORT || 4000;
+const BUILD_DIR = path.join(process.cwd(), '../frontend/build');
+const WAV_DIR = '/data/wav/recordings'; // For reference, not used with S3
 
 app.use(cors());
 
-function getWavFilesFast(rootDir) {
-  return new Promise((resolve, reject) => {
-    const files = [];
-    const proc = spawn('./list_files', [rootDir]);
-    let leftover = '';
+const s3 = new S3Client({ region: process.env.AWS_REGION });
 
-    proc.stdout.on('data', (data) => {
-      const lines = (leftover + data.toString()).split('\n');
-      leftover = lines.pop();
-      files.push(...lines.filter(Boolean));
+async function listWavFilesFromS3(bucket, prefix = "") {
+  let files = [];
+  let ContinuationToken;
+  do {
+    const command = new ListObjectsV2Command({
+      Bucket: bucket,
+      Prefix: prefix,
+      ContinuationToken,
     });
-
-    proc.stdout.on('end', () => {
-      if (leftover) files.push(leftover);
-      resolve(files);
-    });
-
-    proc.stderr.on('data', (data) => {
-      console.error('C++ scanner error:', data.toString());
-    });
-
-    proc.on('error', (err) => reject(err));
-    proc.on('close', (code) => {
-      if (code !== 0) reject(new Error(`Scanner exited with code ${code}`));
-    });
-  });
+    const response = await s3.send(command);
+    if (response.Contents) {
+      files.push(...response.Contents
+        .filter(obj => obj.Key.endsWith(".wav"))
+        .map(obj => obj.Key));
+    }
+    ContinuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+  } while (ContinuationToken);
+  return files;
 }
 
-// Stream a .wav file (support subdirectory path, with Range support)
-app.get('/api/wav-files/*', (req, res) => {
-  const relPath = decodeURIComponent(req.params[0]);
-  const filePath = path.join(WAV_DIR, relPath);
+// Stream a .wav file, transcoding and caching in S3 if needed
+app.get('/api/wav-files/*', async (req, res) => {
+  try {
+    const s3Key = decodeURIComponent(req.params[0]);
+    const BUCKET_NAME = process.env.AWS_BUCKET;
+    const cacheKey = 'cache/' + crypto.createHash('md5').update(s3Key).digest('hex') + '.wav';
 
-  const resolvedBase = path.resolve(WAV_DIR);
-  const resolvedFile = path.resolve(filePath);
-  if (!resolvedFile.startsWith(resolvedBase)) {
-    return res.status(400).json({ error: 'Invalid file path' });
-  }
+    // 1. Try to stream from S3 cache (with Range support)
+    try {
+      await s3.send(new HeadObjectCommand({ Bucket: BUCKET_NAME, Key: cacheKey }));
+      const range = req.headers.range;
+      const params = { Bucket: BUCKET_NAME, Key: cacheKey };
+      if (range) params.Range = range;
+      const command = new GetObjectCommand(params);
+      const s3Response = await s3.send(command);
 
-  // Ensure cache directory exists
-  fs.mkdirSync(CACHE_DIR, { recursive: true });
-  const cachePath = getCachePath(resolvedFile);
-
-  // Helper to stream a file with Range support
-  function streamWithRangeSupport(fileToServe, stats) {
-    const range = req.headers.range;
-    if (!range) {
+      if (range) res.status(206);
       res.setHeader('Content-Type', 'audio/wav');
-      res.setHeader('Content-Length', stats.size);
-      res.setHeader('Content-Disposition', `inline; filename="${path.basename(resolvedFile)}"`);
-      return fs.createReadStream(fileToServe).pipe(res);
+      if (s3Response.ContentLength) res.setHeader('Content-Length', s3Response.ContentLength);
+      if (s3Response.ContentRange) res.setHeader('Content-Range', s3Response.ContentRange);
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Content-Disposition', `inline; filename="${s3Key.split('/').pop()}"`);
+
+      s3Response.Body.pipe(res);
+      return;
+    } catch {
+      // Not in cache, proceed to transcode and cache
     }
-    // Parse Range header
-    const [startStr, endStr] = range.replace(/bytes=/, "").split("-");
-    const start = parseInt(startStr, 10);
-    const end = endStr ? parseInt(endStr, 10) : stats.size - 1;
-    const chunkSize = (end - start) + 1;
 
-    res.status(206);
-    res.setHeader('Content-Range', `bytes ${start}-${end}/${stats.size}`);
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Content-Length', chunkSize);
-    res.setHeader('Content-Type', 'audio/wav');
-    res.setHeader('Content-Disposition', `inline; filename="${path.basename(resolvedFile)}"`);
+    // 2. Not in cache: download original, transcode, upload to S3 cache, then stream
+    const originalCommand = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: s3Key });
+    const originalResponse = await s3.send(originalCommand);
 
-    fs.createReadStream(fileToServe, { start, end }).pipe(res);
-  }
+    const tmpCachePath = path.join(os.tmpdir(), cacheKey.replace(/\//g, '_'));
+    const ffmpeg = spawn('ffmpeg', [
+      '-i', 'pipe:0',
+      '-f', 'wav',
+      '-acodec', 'pcm_s16le',
+      '-ac', '1',
+      '-ar', '44100',
+      tmpCachePath
+    ]);
 
-  // If cached PCM exists, serve it with Range support
-  if (fs.existsSync(cachePath)) {
-    fs.stat(cachePath, (err, stats) => {
-      if (err || !stats.isFile()) {
-        return res.status(404).json({ error: 'File not found' });
-      }
-      streamWithRangeSupport(cachePath, stats);
+    originalResponse.Body.pipe(ffmpeg.stdin);
+
+    ffmpeg.stderr.on('data', (data) => {
+      console.error(`ffmpeg stderr: ${data}`);
     });
-    return;
-  }
 
-  // Otherwise, transcode and cache, then stream after caching (with Range support)
-  const ffmpeg = spawn('ffmpeg', [
-    '-i', resolvedFile,
-    '-f', 'wav',
-    '-acodec', 'pcm_s16le',
-    '-ac', '1',
-    '-ar', '8000',
-    cachePath
-  ]);
-
-  ffmpeg.stderr.on('data', (data) => {
-    console.error(`ffmpeg stderr: ${data}`);
-  });
-
-  ffmpeg.on('error', (error) => {
-    console.error('ffmpeg error:', error);
-    res.status(500).end();
-  });
-
-  ffmpeg.on('close', (code) => {
-    if (code !== 0) {
-      console.error(`ffmpeg exited with code ${code}`);
-      return res.status(500).end();
-    }
-    // Now stream the cached file with Range support
-    fs.stat(cachePath, (err, stats) => {
-      if (err || !stats.isFile()) {
-        return res.status(404).json({ error: 'File not found' });
-      }
-      streamWithRangeSupport(cachePath, stats);
+    ffmpeg.on('error', (error) => {
+      console.error('ffmpeg error:', error);
+      res.status(500).end();
     });
-  });
+
+    ffmpeg.on('close', async (code) => {
+      if (code !== 0) {
+        console.error(`ffmpeg exited with code ${code}`);
+        return res.status(500).end();
+      }
+      try {
+        const fileStream = fs.createReadStream(tmpCachePath);
+        await s3.send(new PutObjectCommand({
+          Bucket: BUCKET_NAME,
+          Key: cacheKey,
+          Body: fileStream,
+          ContentType: 'audio/wav'
+        }));
+        // Stream the cached file to the client (with Range support)
+        const range = req.headers.range;
+        const params = { Bucket: BUCKET_NAME, Key: cacheKey };
+        if (range) params.Range = range;
+        const cachedCommand = new GetObjectCommand(params);
+        const cachedResponse = await s3.send(cachedCommand);
+
+        if (range) res.status(206);
+        res.setHeader('Content-Type', 'audio/wav');
+        if (cachedResponse.ContentLength) res.setHeader('Content-Length', cachedResponse.ContentLength);
+        if (cachedResponse.ContentRange) res.setHeader('Content-Range', cachedResponse.ContentRange);
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Content-Disposition', `inline; filename="${s3Key.split('/').pop()}"`);
+
+        cachedResponse.Body.pipe(res);
+
+        fs.unlink(tmpCachePath, () => {});
+      } catch (err) {
+        console.error('S3 upload or stream error:', err);
+        res.status(500).end();
+      }
+    });
+  } catch (err) {
+    console.error('Error streaming S3 file:', err);
+    res.status(404).json({ error: 'File not found' });
+  }
 });
 
+// List .wav files from S3, supporting date range queries
 app.get('/api/wav-files', async (req, res) => {
   try {
-    const files = await getWavFilesFast(WAV_DIR);
+    const BUCKET_NAME = process.env.AWS_BUCKET;
+    let PREFIX = 'recordings/';
+    const { dateStart, dateEnd } = req.query;
+    let files = [];
+
+    if (dateStart && !dateEnd) {
+      PREFIX += `${dateStart}/`;
+      files = await listWavFilesFromS3(BUCKET_NAME, PREFIX);
+    } else if (dateStart && dateEnd) {
+      const start = dayjs(dateStart, "M_D_YYYY");
+      const end = dayjs(dateEnd, "M_D_YYYY");
+      let current = start.clone();
+      while (current.isSameOrBefore(end, "day")) {
+        const dayPrefix = `recordings/${current.format("M_D_YYYY")}/`;
+        const dayFiles = await listWavFilesFromS3(BUCKET_NAME, dayPrefix);
+        files.push(...dayFiles);
+        current = current.add(1, "day");
+      }
+    } else {
+      files = await listWavFilesFromS3(BUCKET_NAME, PREFIX);
+    }
+
     res.json(files);
   } catch (err) {
     console.error('Error in /api/wav-files:', err);
@@ -143,14 +175,7 @@ app.get('/api/wav-files', async (req, res) => {
   }
 });
 
-function getCachePath(originalPath) {
-  // Use a hash of the original path for unique cache file names
-  const hash = crypto.createHash('md5').update(originalPath).digest('hex');
-  return path.join(CACHE_DIR, hash + '.wav');
-}
-
 // Serve React static files
-const BUILD_DIR = path.join(process.cwd(), '../frontend/build');
 app.use(express.static(BUILD_DIR));
 
 // Fallback: serve index.html for any non-API route

@@ -21,7 +21,7 @@ FROM node:18-slim
 
 
 # Install rclone for Backblaze B2 mounting
-RUN apt-get update && apt-get install -y curl fuse3 ffmpeg s3fs g++ python3 cron \
+RUN apt-get update && apt-get install -y curl fuse3 ffmpeg s3fs \
 	&& curl -O https://downloads.rclone.org/rclone-current-linux-amd64.deb \
 	&& dpkg -i rclone-current-linux-amd64.deb \
 	&& rm rclone-current-linux-amd64.deb \
@@ -38,9 +38,6 @@ COPY --from=build /app/frontend/build ./frontend/build
 # Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-
-# Copy and compile the C++ source file
-RUN g++ -std=c++17 -O2 -o /app/backend/list_files /app/backend/list_files.cpp
 
 ENV WAV_DIR=/data/wav
 

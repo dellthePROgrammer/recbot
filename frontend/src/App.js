@@ -19,6 +19,11 @@ import {
   Switch,
   FormControlLabel,
   CssBaseline,
+  Select,
+  MenuItem,
+  CircularProgress,
+  FormControl,
+  InputLabel,
 } from "@mui/material";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -28,14 +33,11 @@ import { DatePicker } from "@mui/x-date-pickers/DatePicker";
 import { TimePicker } from "@mui/x-date-pickers/TimePicker";
 import dayjs from "dayjs";
 import { ThemeProvider, createTheme } from "@mui/material/styles";
-import Select from "@mui/material/Select";
-import MenuItem from "@mui/material/MenuItem";
-import CircularProgress from "@mui/material/CircularProgress";
-import FormControl from "@mui/material/FormControl";
-import InputLabel from "@mui/material/InputLabel";
 
 function parseFileInfo(file) {
-  const [folder, filename] = file.split('/');
+  const cleanFile = file.startsWith('recordings/') ? file.slice('recordings/'.length) : file;
+  const [folder, filename] = cleanFile.split('/');
+  if (!folder || !filename) return { file, date: '', phone: '', email: '', time: '', durationMs: 0 };
   const date = folder.replace(/_/g, '/');
   const phoneMatch = filename.match(/^(\d+)/);
   const phone = phoneMatch ? phoneMatch[1] : '';
@@ -69,11 +71,10 @@ function App() {
   const [sortDirection, setSortDirection] = useState("asc");
   const [darkMode, setDarkMode] = useState(false);
   const [durationMin, setDurationMin] = useState("");
-  const [durationMode, setDurationMode] = useState("min"); // "min" or "max"
-  const [timeMode, setTimeMode] = useState("range"); // "range", "Older", or "Newer"
+  const [durationMode, setDurationMode] = useState("min");
+  const [timeMode, setTimeMode] = useState("range");
   const [error500, setError500] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [totalFiles, setTotalFiles] = useState(0);
   const [filesPerPage, setFilesPerPage] = useState(25);
 
   const theme = createTheme({
@@ -82,7 +83,7 @@ function App() {
     },
   });
 
-  // Fetch files only when a date is selected
+  // Fetch files only when a date is selected or changed
   const fetchFiles = (start, end) => {
     if (!start) return;
     setLoading(true);
@@ -109,7 +110,6 @@ function App() {
       });
   };
 
-  // When the user selects a date or date range, or changes filesPerPage, fetch files
   useEffect(() => {
     if (calendarDateStart) {
       fetchFiles(calendarDateStart, calendarDateEnd);
@@ -118,20 +118,12 @@ function App() {
     // eslint-disable-next-line
   }, [calendarDateStart, calendarDateEnd]);
 
-  // When the user changes page, fetch that page
-  useEffect(() => {
-    if (calendarDateStart) {
-      fetchFiles(calendarDateStart, calendarDateEnd, page, filesPerPage);
-    }
-    // eslint-disable-next-line
-  }, [page]);
-
   const playFile = (file) => {
     const encodedPath = file.split('/').map(encodeURIComponent).join('/');
     setPlaying(`/api/wav-files/${encodedPath}`);
   };
 
-  // Filter files by column filters
+  // Filtering
   const filteredFiles = files.filter((file) => {
     const info = parseFileInfo(file);
 
@@ -201,7 +193,7 @@ function App() {
     );
   });
 
-  // Sort filtered files
+  // Sorting
   const sortedFiles = [...filteredFiles].sort((a, b) => {
     const infoA = parseFileInfo(a);
     const infoB = parseFileInfo(b);
@@ -212,7 +204,6 @@ function App() {
       valA = Number(valA);
       valB = Number(valB);
     } else if (sortColumn === "time") {
-      // Parse time strings to dayjs objects for comparison
       const timeA = dayjs(valA, "hh:mm:ss A");
       const timeB = dayjs(valB, "hh:mm:ss A");
       if (timeA.isValid() && timeB.isValid()) {
@@ -220,7 +211,6 @@ function App() {
         if (timeA.isAfter(timeB)) return sortDirection === "asc" ? 1 : -1;
         return 0;
       }
-      // Fallback to string comparison if invalid
       valA = valA || "";
       valB = valB || "";
     } else {
@@ -233,34 +223,16 @@ function App() {
     return 0;
   });
 
-  // Paginate sorted files
+  // Pagination
   const pageCount = Math.max(1, Math.ceil(sortedFiles.length / filesPerPage));
   const paginatedFiles = sortedFiles.slice((page - 1) * filesPerPage, page * filesPerPage);
 
-  const handleDarkModeToggle = () => {
-    setDarkMode((prev) => !prev);
-  };
-
-  const handleCalendarDateStart = (newValue) => {
-    setCalendarDateStart(newValue);
-    setPage(1);
-  };
-
-  const handleCalendarDateEnd = (newValue) => {
-    setCalendarDateEnd(newValue);
-    setPage(1);
-  };
-
-  const handlePhoneFilter = (e) => {
-    setPhoneFilter(e.target.value);
-    setPage(1);
-  };
-
-  const handleEmailFilter = (e) => {
-    setEmailFilter(e.target.value);
-    setPage(1);
-  };
-
+  // Handlers
+  const handleDarkModeToggle = () => setDarkMode((prev) => !prev);
+  const handleCalendarDateStart = (newValue) => { setCalendarDateStart(newValue); setPage(1); };
+  const handleCalendarDateEnd = (newValue) => { setCalendarDateEnd(newValue); setPage(1); };
+  const handlePhoneFilter = (e) => { setPhoneFilter(e.target.value); setPage(1); };
+  const handleEmailFilter = (e) => { setEmailFilter(e.target.value); setPage(1); };
   const handleSort = (column) => {
     if (sortColumn === column) {
       setSortDirection(sortDirection === "asc" ? "desc" : "asc");
@@ -271,7 +243,6 @@ function App() {
     setPage(1);
   };
 
-  // When the filtered files change, adjust the page if necessary
   useEffect(() => {
     const maxPage = Math.max(1, Math.ceil(filteredFiles.length / filesPerPage));
     if (page > maxPage) setPage(1);
@@ -333,11 +304,7 @@ function App() {
               <LocalizationProvider dateAdapter={AdapterDayjs}>
                 <Box display="flex" alignItems="center">
                   <TimePicker
-                    label={
-                      timeMode === "range"
-                        ? "Start time"
-                        : timeMode
-                    }
+                    label={timeMode === "range" ? "Start time" : timeMode}
                     value={timePickerStart}
                     onChange={setTimePickerStart}
                     slotProps={{ textField: { size: "small", fullWidth: true } }}
@@ -393,9 +360,7 @@ function App() {
                 </Select>
               </Box>
             </Grid>
-            <Grid item xs={2}>
-              {/* Empty grid to keep layout aligned */}
-            </Grid>
+            <Grid item xs={2}></Grid>
             <Grid item xs={1}>
               <TextField
                 label="Phone"
@@ -417,7 +382,7 @@ function App() {
               />
             </Grid>
           </Grid>
-          {/* Add files per page selector */}
+          {/* Files per page selector */}
           <Box display="flex" justifyContent="flex-end" alignItems="center" mb={2}>
             <FormControl size="small" sx={{ minWidth: 120 }}>
               <InputLabel id="files-per-page-label">Files per page</InputLabel>
