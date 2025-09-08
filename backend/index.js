@@ -4,7 +4,9 @@ import { spawn } from 'child_process';
 import crypto from 'crypto';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat.js';
+import isSameOrBefore from 'dayjs/plugin/isSameOrBefore.js';
 dayjs.extend(customParseFormat);
+dayjs.extend(isSameOrBefore);
 
 import fs from 'fs';
 import path from 'path';
@@ -42,11 +44,16 @@ app.get('/api/wav-files', (req, res) => {
     let wavFiles = [];
     for (const folder of foldersToScan) {
       const folderPath = path.join(WAV_DIR, folder);
-      if (fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
-        const files = fs.readdirSync(folderPath)
-          .filter(f => f.endsWith('.wav'))
-          .map(f => `${folder}/${f}`);
-        wavFiles.push(...files);
+      try {
+        if (fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
+          const files = fs.readdirSync(folderPath)
+            .filter(f => f.endsWith('.wav'))
+            .map(f => `${folder}/${f}`);
+          wavFiles.push(...files);
+        }
+      } catch (e) {
+        // Ignore missing or inaccessible folders
+        continue;
       }
     }
 
