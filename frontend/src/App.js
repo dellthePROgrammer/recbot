@@ -141,27 +141,32 @@ function App() {
       const fileDate = dayjs(info.date, "M/D/YYYY");
       dateMatch =
         fileDate.isValid() &&
-        !fileDate.isBefore(dayjs(calendarDateStart)) &&
-        !fileDate.isAfter(dayjs(calendarDateEnd));
+        !fileDate.isBefore(dayjs(calendarDateStart).startOf("day")) &&
+        !fileDate.isAfter(dayjs(calendarDateEnd).endOf("day"));
     } else if (calendarDateStart) {
       const fileDate = dayjs(info.date, "M/D/YYYY");
-      dateMatch = fileDate.isValid() && fileDate.isSame(dayjs(calendarDateStart), "day");
+      dateMatch =
+        fileDate.isValid() &&
+        fileDate.isSame(dayjs(calendarDateStart), "day");
     }
 
     // Time filter logic
     let timeMatch = true;
-    const fileTime = dayjs(info.time, "hh:mm:ss A");
-    if (timeMode === "range" && timePickerStart && timePickerEnd) {
-      timeMatch =
-        fileTime.isValid() &&
-        !fileTime.isBefore(dayjs(timePickerStart)) &&
-        !fileTime.isAfter(dayjs(timePickerEnd));
-    } else if (timeMode === "Older" && timePickerStart) {
-      // Older: fileTime <= selected time
-      timeMatch = fileTime.isValid() && !fileTime.isAfter(dayjs(timePickerStart));
-    } else if (timeMode === "Newer" && timePickerStart) {
-      // Newer: fileTime >= selected time
-      timeMatch = fileTime.isValid() && !fileTime.isBefore(dayjs(timePickerStart));
+    if (info.time) {
+      const fileTime = dayjs(info.time, "hh:mm:ss A");
+      const startTime = timePickerStart ? dayjs(timePickerStart, "hh:mm:ss A") : null;
+      const endTime = timePickerEnd ? dayjs(timePickerEnd, "hh:mm:ss A") : null;
+
+      if (timeMode === "range" && startTime && endTime) {
+        timeMatch =
+          fileTime.isValid() &&
+          !fileTime.isBefore(startTime) &&
+          !fileTime.isAfter(endTime);
+      } else if (timeMode === "Older" && startTime) {
+        timeMatch = fileTime.isValid() && !fileTime.isAfter(startTime);
+      } else if (timeMode === "Newer" && startTime) {
+        timeMatch = fileTime.isValid() && !fileTime.isBefore(startTime);
+      }
     }
 
     // Duration filter logic (min or max)
@@ -174,17 +179,30 @@ function App() {
         durationMatch = durationSec <= Number(durationMin);
       }
     }
+
+    // Phone filter (partial match, ignore empty)
+    let phoneMatch = true;
+    if (phoneFilter.trim() !== "") {
+      phoneMatch = info.phone.toLowerCase().includes(phoneFilter.toLowerCase());
+    }
+
+    // Email filter (partial match, ignore empty)
+    let emailMatch = true;
+    if (emailFilter.trim() !== "") {
+      emailMatch = info.email.toLowerCase().includes(emailFilter.toLowerCase());
+    }
+
     return (
       dateMatch &&
       timeMatch &&
-      info.phone.toLowerCase().includes(phoneFilter.toLowerCase()) &&
-      info.email.toLowerCase().includes(emailFilter.toLowerCase()) &&
+      phoneMatch &&
+      emailMatch &&
       durationMatch
     );
   });
 
   // Sort filtered files
-  const sortedFiles = [...files].sort((a, b) => {
+  const sortedFiles = [...filteredFiles].sort((a, b) => {
     const infoA = parseFileInfo(a);
     const infoB = parseFileInfo(b);
     let valA = infoA[sortColumn];
@@ -215,6 +233,7 @@ function App() {
     return 0;
   });
 
+  // Paginate sorted files
   const pageCount = Math.max(1, Math.ceil(sortedFiles.length / filesPerPage));
   const paginatedFiles = sortedFiles.slice((page - 1) * filesPerPage, page * filesPerPage);
 
