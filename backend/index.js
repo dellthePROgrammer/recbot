@@ -15,6 +15,7 @@ import {
   PutObjectCommand,
   HeadObjectCommand
 } from "@aws-sdk/client-s3";
+import authRouter from "./auth.js";
 
 dayjs.extend(customParseFormat);
 dayjs.extend(isSameOrBefore);
@@ -25,6 +26,7 @@ const BUILD_DIR = path.join(process.cwd(), '../frontend/build');
 const WAV_DIR = '/data/wav/recordings'; // For reference, not used with S3
 
 app.use(cors());
+app.use(authRouter);
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 

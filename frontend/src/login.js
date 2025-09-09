@@ -2,9 +2,9 @@ import React from "react";
 import { Button, Container, Typography, Box } from "@mui/material";
 
 const BETTERAUTH_URL = "https://auth.better-auth.com/oauth/authorize";
-const CLIENT_ID = process.env.REACT_APP_BETTERAUTH_CLIENT_ID; // Set this in your .env file
+const CLIENT_ID = process.env.REACT_APP_BETTERAUTH_CLIENT_ID;
 const REDIRECT_URI = window.location.origin + "/auth/callback";
-const PROVIDER = "microsoft"; // For Microsoft login
+const PROVIDER = "microsoft";
 
 const AUTH_URL =
   `${BETTERAUTH_URL}?client_id=${encodeURIComponent(CLIENT_ID)}` +

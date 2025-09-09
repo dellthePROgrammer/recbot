@@ -28,6 +28,8 @@ services:
       - traefik.http.routers.recbot.entrypoints=websecure
       - traefik.http.routers.recbot.tls.certresolver=letsencrypt
       - traefik.http.services.recbot.loadbalancer.server.port=4000
+    volumes:
+      - ./data/sqlite:/root/db
     ports:
       #- "4000:4000"
       #- "2222:2222"
@@ -37,6 +39,13 @@ services:
       - AWS_SECRET_ACCESS_KEY=your-aws-secret-access-key-here
       - AWS_REGION=your-aws-region-here
       - AWS_BUCKET=your-aws-bucket-name-here
+      - REACT_APP_API_URL=https://your-domain-here/api
+      - BETTERAUTH_CLIENT_ID=your-betterauth-client-id-here
+      - BETTERAUTH_CLIENT_SECRET=your-betterauth-client-secret-here
+      - BETTERAUTH_REDIRECT_URI=https://your-domain-here/auth/callback
+      #- GOOGLE_CLIENT_ID=your_google_client_id_here
+      #- GOOGLE_CLIENT_SECRET=your_google_client_secret_here
+      #- GOOGLE_REDIRECT_URI=http://your-domain-here/auth/google/callback
       #- B2_ACCOUNT=your_b2_key_id
       #- B2_KEY=your_b2_key
       #- B2_BUCKET=your_b2_bucket_name
@@ -55,3 +64,9 @@ services:
     # volumes:
     #   - ./local_wav:/data/wav
     #   - ./logs:/var/log
+  sqlite:
+    image: nouchka/sqlite3:latest
+    container_name: sqlite
+    volumes:
+      - ./data/sqlite:/root/db
+    command: ["sqlite3", "/root/db/recbot.db"]
