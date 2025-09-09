@@ -1,5 +1,5 @@
 # Use official Node.js image for backend and build
-FROM node:18-slim as build
+FROM node:20-slim as build
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ RUN cd frontend && npm install --legacy-peer-deps && npx react-scripts build
 COPY backend ./backend
 
 # Final image for running app and sshfs
-FROM node:18-slim
+FROM node:20-slim
 
 
 # Install rclone for Backblaze B2 mounting

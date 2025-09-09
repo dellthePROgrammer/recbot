@@ -20,8 +20,10 @@ services:
       - "./letsencrypt:/letsencrypt"
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
   recbot:
-    image: ghostreaper69/recbot:v0.1.65
+    image: ghostreaper69/recbot:v1.0.1
     container_name: "recbot"
+    depends_on:
+      - sqlite
     labels:
       - traefik.enable=true
       - traefik.http.routers.recbot.rule=Host(`your-domain-here`)
@@ -31,7 +33,7 @@ services:
     volumes:
       - ./data/sqlite:/root/db
     ports:
-      #- "4000:4000"
+      - "4000:4000"
       #- "2222:2222"
     environment:
       - STORAGE_TYPE=aws
