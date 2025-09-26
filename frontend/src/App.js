@@ -80,6 +80,9 @@ function App() {
   const [totalCount, setTotalCount] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [currentOffset, setCurrentOffset] = useState(0);
+  const [dbStats, setDbStats] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState("");
 
   const theme = createTheme({
     palette: {
@@ -241,6 +244,75 @@ function App() {
     }
   };
 
+  // Database management functions
+  const fetchDatabaseStats = async () => {
+    try {
+      const response = await fetch('/api/database-stats');
+      const stats = await response.json();
+      setDbStats(stats);
+    } catch (error) {
+      console.error('Error fetching database stats:', error);
+    }
+  };
+
+  const syncDatabase = async (dateRange = null) => {
+    setSyncing(true);
+    setSyncProgress("Starting database sync...");
+    
+    try {
+      const body = dateRange ? { dateRange } : {};
+      
+      const response = await fetch('/api/sync-database', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      
+      const result = await response.json();
+      
+      if (result.success) {
+        setSyncProgress(`✅ Synced ${result.indexedFiles} files in ${result.duration}`);
+        await fetchDatabaseStats(); // Refresh stats
+        
+        // Refresh current file list
+        if (calendarDateStart) {
+          refreshFiles(true);
+        }
+      } else {
+        setSyncProgress(`❌ Sync failed: ${result.error}`);
+      }
+    } catch (error) {
+      setSyncProgress(`❌ Sync error: ${error.message}`);
+    }
+    
+    setSyncing(false);
+  };
+
+  const syncDateRange = () => {
+    if (calendarDateStart && calendarDateEnd) {
+      const dateRange = {
+        startDate: dayjs(calendarDateStart).format("M_D_YYYY"),
+        endDate: dayjs(calendarDateEnd).format("M_D_YYYY")
+      };
+      console.log('🗓️ Syncing date range:', dateRange);
+      syncDatabase(dateRange);
+    } else if (calendarDateStart) {
+      const dateRange = {
+        startDate: dayjs(calendarDateStart).format("M_D_YYYY"),
+        endDate: dayjs(calendarDateStart).format("M_D_YYYY")
+      };
+      console.log('🗓️ Syncing single date:', dateRange);
+      syncDatabase(dateRange);
+    } else {
+      console.warn('⚠️ No dates selected for sync');
+    }
+  };
+
+  // Load database stats on component mount
+  useEffect(() => {
+    fetchDatabaseStats();
+  }, []);
+
   // No need for useEffect to adjust page since backend handles pagination
 
   return (
@@ -270,6 +342,18 @@ function App() {
               >
                 <RefreshIcon />
               </IconButton>
+              
+              {/* Database Stats Display */}
+              {dbStats && dbStats.totalFiles !== undefined && (
+                <Box sx={{ ml: 2, textAlign: 'center' }}>
+                  <Typography variant="caption" display="block">
+                    DB: {(dbStats.totalFiles || 0).toLocaleString()} files
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    {((dbStats.databaseSize || 0) / 1024 / 1024).toFixed(1)} MB
+                  </Typography>
+                </Box>
+              )}
             </Box>
           </Box>
           {/* Column filters */}
@@ -401,6 +485,63 @@ function App() {
               />
             </Grid>
           </Grid>
+          
+          {/* Database Management Section */}
+          <Paper elevation={1} sx={{ p: 2, mb: 2, backgroundColor: darkMode ? 'grey.900' : 'grey.50' }}>
+            <Typography variant="h6" gutterBottom>
+              Database Management - Scale: {dbStats ? `${dbStats.totalFiles.toLocaleString()} files` : 'Loading...'}
+            </Typography>
+            <Box display="flex" gap={2} alignItems="center" flexWrap="wrap">
+              <Button
+                variant="outlined"
+                onClick={syncDateRange}
+                disabled={syncing || !calendarDateStart}
+                color="primary"
+              >
+                {syncing ? 'Syncing...' : 'Sync Selected Dates'}
+              </Button>
+              
+              <Button
+                variant="outlined"
+                onClick={() => syncDatabase()}
+                disabled={syncing}
+                color="warning"
+                title="WARNING: Will sync ALL files - may take time with 300k+ files"
+              >
+                {syncing ? 'Syncing...' : 'Full Sync (⚠️ All Files)'}
+              </Button>
+              
+              <Button
+                variant="text"
+                onClick={fetchDatabaseStats}
+                size="small"
+                disabled={syncing}
+              >
+                Refresh Stats
+              </Button>
+              
+              {syncProgress && (
+                <Typography 
+                  variant="body2" 
+                  sx={{ 
+                    color: syncProgress.includes('✅') ? 'success.main' : 
+                           syncProgress.includes('❌') ? 'error.main' : 'info.main',
+                    fontWeight: 'medium'
+                  }}
+                >
+                  {syncProgress}
+                </Typography>
+              )}
+              
+              {syncing && <CircularProgress size={20} />}
+            </Box>
+            
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+              💡 Performance Mode: For 300k+ files, use "Sync Selected Dates" first, then browse. 
+              Full sync recommended during maintenance windows only.
+            </Typography>
+          </Paper>
+          
           {/* Files per page selector */}
           <Box display="flex" justifyContent="flex-end" alignItems="center" mb={2}>
             <FormControl size="small" sx={{ minWidth: 120 }}>

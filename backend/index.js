@@ -15,6 +15,7 @@ import {
   PutObjectCommand,
   HeadObjectCommand
 } from "@aws-sdk/client-s3";
+import { queryFiles, indexFiles, indexFile, getDatabaseStats } from './database.js';
 
 dayjs.extend(customParseFormat);
 dayjs.extend(isSameOrBefore);
@@ -25,6 +26,7 @@ const BUILD_DIR = path.join(process.cwd(), '../frontend/build');
 const WAV_DIR = '/data/wav/recordings'; // For reference, not used with S3
 
 app.use(cors());
+app.use(express.json()); // Parse JSON request bodies
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 
@@ -144,14 +146,13 @@ app.get('/api/wav-files/*', async (req, res) => {
 });
 
 // List .wav files from S3, supporting date range queries
+// High-performance files endpoint using database
 app.get('/api/wav-files', async (req, res) => {
   try {
-    const BUCKET_NAME = process.env.AWS_BUCKET;
-    let PREFIX = 'recordings/';
-    const { 
-      dateStart, 
-      dateEnd, 
-      offset = 0, 
+    const {
+      dateStart,
+      dateEnd,
+      offset = 0,
       limit = 25,
       phone,
       email,
@@ -161,158 +162,121 @@ app.get('/api/wav-files', async (req, res) => {
       timeEnd,
       timeMode = "range",
       sortColumn = "date",
-      sortDirection = "asc"
+      sortDirection = "desc"
     } = req.query;
-    
-    // Debug phone filter
-    if (phone) {
-      console.log('Phone filter received:', JSON.stringify(phone), 'Type:', typeof phone);
-    }
-    
-    let files = [];
 
-    if (dateStart && !dateEnd) {
-      PREFIX += `${dateStart}/`;
-      files = await listWavFilesFromS3(BUCKET_NAME, PREFIX);
-    } else if (dateStart && dateEnd) {
-      const start = dayjs(dateStart, "M_D_YYYY");
-      const end = dayjs(dateEnd, "M_D_YYYY");
-      let current = start.clone();
-      while (current.isSameOrBefore(end, "day")) {
-        const dayPrefix = `recordings/${current.format("M_D_YYYY")}/`;
-        const dayFiles = await listWavFilesFromS3(BUCKET_NAME, dayPrefix);
-        files.push(...dayFiles);
-        current = current.add(1, "day");
-      }
-    } else {
-      files = await listWavFilesFromS3(BUCKET_NAME, PREFIX);
-    }
-
-    // Apply filters
-    const filteredFiles = files.filter(file => {
-      const cleanFile = file.startsWith('recordings/') ? file.slice('recordings/'.length) : file;
-      const [folder, filename] = cleanFile.split('/');
-      if (!folder || !filename) return false;
-
-      const date = folder.replace(/_/g, '/');
-      const phoneMatch = filename.match(/^(\d+)/);
-      const filePhone = phoneMatch ? phoneMatch[1] : '';
-      const emailMatch = filename.match(/by ([^@]+@[^ ]+)/);
-      const fileEmail = emailMatch ? emailMatch[1] : '';
-      const timeMatch = filename.match(/@ ([\d_]+ [AP]M)/);
-      const time = timeMatch ? timeMatch[1].replace(/_/g, ':') : '';
-      const durationMatch = filename.match(/_(\d+)\.wav$/);
-      const durationMs = durationMatch ? parseInt(durationMatch[1], 10) : 0;
-      const durationSec = Math.floor(durationMs / 1000);
-
-      // Phone filter
-      if (phone && phone.trim() !== "") {
-        const phoneSearch = phone.trim();
-        if (!filePhone.includes(phoneSearch)) {
-          return false;
-        }
-      }
-
-      // Email filter
-      if (email && !fileEmail.toLowerCase().includes(email.toLowerCase())) return false;
-
-      // Duration filter
-      if (durationMin && !isNaN(durationMin)) {
-        if (durationMode === "min" && durationSec < Number(durationMin)) return false;
-        if (durationMode === "max" && durationSec > Number(durationMin)) return false;
-      }
-
-      // Time filter
-      if (time && (timeStart || timeEnd)) {
-        const fileTime = dayjs(time, "hh:mm:ss A");
-        const startTime = timeStart ? dayjs(timeStart, "hh:mm:ss A") : null;
-        const endTime = timeEnd ? dayjs(timeEnd, "hh:mm:ss A") : null;
-
-        if (timeMode === "range" && startTime && endTime) {
-          if (!fileTime.isValid() || fileTime.isBefore(startTime) || fileTime.isAfter(endTime)) return false;
-        } else if (timeMode === "Older" && startTime) {
-          if (!fileTime.isValid() || fileTime.isAfter(startTime)) return false;
-        } else if (timeMode === "Newer" && startTime) {
-          if (!fileTime.isValid() || fileTime.isBefore(startTime)) return false;
-        }
-      }
-
-      return true;
+    // Use database query for ultra-fast results
+    const result = queryFiles({
+      dateStart,
+      dateEnd,
+      phone: phone?.trim() || null,
+      email: email?.trim() || null,
+      durationMin: durationMin ? parseInt(durationMin) : null,
+      timeStart,
+      timeEnd,
+      sortColumn,
+      sortDirection,
+      limit: parseInt(limit) || 25,
+      offset: parseInt(offset) || 0
     });
 
-    // Apply sorting
-    const sortedFiles = [...filteredFiles].sort((a, b) => {
-      const cleanFileA = a.startsWith('recordings/') ? a.slice('recordings/'.length) : a;
-      const cleanFileB = b.startsWith('recordings/') ? b.slice('recordings/'.length) : b;
-      const [folderA, filenameA] = cleanFileA.split('/');
-      const [folderB, filenameB] = cleanFileB.split('/');
-      
-      if (!folderA || !filenameA || !folderB || !filenameB) return 0;
-
-      let valA, valB;
-
-      if (sortColumn === "date") {
-        const dateA = folderA.replace(/_/g, '/');
-        const dateB = folderB.replace(/_/g, '/');
-        valA = dayjs(dateA, "M/D/YYYY").valueOf();
-        valB = dayjs(dateB, "M/D/YYYY").valueOf();
-      } else if (sortColumn === "phone") {
-        const phoneMatchA = filenameA.match(/^(\d+)/);
-        const phoneMatchB = filenameB.match(/^(\d+)/);
-        valA = phoneMatchA ? phoneMatchA[1] : '';
-        valB = phoneMatchB ? phoneMatchB[1] : '';
-      } else if (sortColumn === "email") {
-        const emailMatchA = filenameA.match(/by ([^@]+@[^ ]+)/);
-        const emailMatchB = filenameB.match(/by ([^@]+@[^ ]+)/);
-        valA = emailMatchA ? emailMatchA[1] : '';
-        valB = emailMatchB ? emailMatchB[1] : '';
-      } else if (sortColumn === "time") {
-        const timeMatchA = filenameA.match(/@ ([\d_]+ [AP]M)/);
-        const timeMatchB = filenameB.match(/@ ([\d_]+ [AP]M)/);
-        const timeA = timeMatchA ? timeMatchA[1].replace(/_/g, ':') : '';
-        const timeB = timeMatchB ? timeMatchB[1].replace(/_/g, ':') : '';
-        valA = timeA ? dayjs(timeA, "hh:mm:ss A").valueOf() : 0;
-        valB = timeB ? dayjs(timeB, "hh:mm:ss A").valueOf() : 0;
-      } else if (sortColumn === "durationMs") {
-        const durationMatchA = filenameA.match(/_(\d+)\.wav$/);
-        const durationMatchB = filenameB.match(/_(\d+)\.wav$/);
-        valA = durationMatchA ? parseInt(durationMatchA[1], 10) : 0;
-        valB = durationMatchB ? parseInt(durationMatchB[1], 10) : 0;
-      } else {
-        valA = a;
-        valB = b;
-      }
-
-      // Handle string vs number comparison
-      if (typeof valA === 'string' && typeof valB === 'string') {
-        valA = valA.toLowerCase();
-        valB = valB.toLowerCase();
-      }
-
-      let result = 0;
-      if (valA < valB) result = -1;
-      else if (valA > valB) result = 1;
-
-      return sortDirection === "desc" ? -result : result;
-    });
-
-    // Apply offset-based pagination
-    const offsetNum = parseInt(offset, 10) || 0;
-    const limitNum = parseInt(limit, 10) || 25;
-    const totalCount = sortedFiles.length;
-    const paginatedFiles = sortedFiles.slice(offsetNum, offsetNum + limitNum);
-    const hasMore = offsetNum + limitNum < totalCount;
+    // Convert database format back to frontend format
+    const files = result.files.map(file => file.file_path);
 
     res.json({
-      files: paginatedFiles,
-      totalCount,
-      offset: offsetNum,
-      limit: limitNum,
-      hasMore
+      files,
+      totalCount: result.totalCount,
+      offset: parseInt(offset) || 0,
+      limit: parseInt(limit) || 25,
+      hasMore: result.hasMore
     });
+
   } catch (err) {
     console.error('Error in /api/wav-files:', err);
     res.status(500).json({ files: [], totalCount: 0, offset: 0, limit: 25, hasMore: false });
+  }
+});
+
+// Database sync/indexing endpoint for initial setup and maintenance
+app.post('/api/sync-database', async (req, res) => {
+  try {
+    const BUCKET_NAME = process.env.AWS_BUCKET;
+    const { dateRange, forceReindex = false } = req.body || {};
+
+    console.log(`📊 [SYNC] ${dateRange ? 'Date range' : 'Full'} sync requested`);
+
+    console.log('Starting database sync...');
+    const startTime = Date.now();
+    let indexedCount = 0;
+
+    if (dateRange) {
+      // Sync specific date range
+      const { startDate, endDate } = dateRange;
+      const start = dayjs(startDate, "M_D_YYYY");
+      const end = dayjs(endDate, "M_D_YYYY");
+      let current = start.clone();
+
+      while (current.isSameOrBefore(end, "day")) {
+        const dayPrefix = `recordings/${current.format("M_D_YYYY")}/`;
+        console.log(`Indexing files for ${current.format("M_D_YYYY")}...`);
+        
+        const dayFiles = await listWavFilesFromS3(BUCKET_NAME, dayPrefix);
+        if (dayFiles.length > 0) {
+          const batchIndexed = indexFiles(dayFiles);
+          indexedCount += batchIndexed;
+          console.log(`Indexed ${batchIndexed}/${dayFiles.length} files for ${current.format("M_D_YYYY")}`);
+        }
+        
+        current = current.add(1, "day");
+      }
+    } else {
+      // Full sync - be careful with 300k+ files!
+      console.log('WARNING: Full sync initiated - this may take a while...');
+      const allFiles = await listWavFilesFromS3(BUCKET_NAME, 'recordings/');
+      console.log(`Found ${allFiles.length} total files to index`);
+      
+      // Process in batches of 1000 for memory efficiency
+      const batchSize = 1000;
+      for (let i = 0; i < allFiles.length; i += batchSize) {
+        const batch = allFiles.slice(i, i + batchSize);
+        const batchIndexed = indexFiles(batch);
+        indexedCount += batchIndexed;
+        
+        console.log(`Batch ${Math.floor(i/batchSize) + 1}: Indexed ${batchIndexed}/${batch.length} files (Total: ${indexedCount}/${allFiles.length})`);
+        
+        // Brief pause to prevent overwhelming the system
+        if (i + batchSize < allFiles.length) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+    }
+
+    const endTime = Date.now();
+    const duration = (endTime - startTime) / 1000;
+    
+    const stats = getDatabaseStats();
+    
+    res.json({
+      success: true,
+      indexedFiles: indexedCount,
+      duration: `${duration.toFixed(2)}s`,
+      databaseStats: stats
+    });
+
+  } catch (err) {
+    console.error('Error syncing database:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Database statistics endpoint
+app.get('/api/database-stats', (req, res) => {
+  try {
+    const stats = getDatabaseStats();
+    res.json(stats);
+  } catch (err) {
+    console.error('Error getting database stats:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -326,6 +290,40 @@ app.get('*', (req, res) => {
   }
 });
 
+// Auto-sync function for current day
+async function syncCurrentDay() {
+  try {
+    const BUCKET_NAME = process.env.AWS_BUCKET;
+    const today = dayjs().format("M_D_YYYY");
+    const dayPrefix = `recordings/${today}/`;
+    
+    console.log(`🔄 [AUTO-SYNC] Checking current day: ${today}`);
+    
+    const dayFiles = await listWavFilesFromS3(BUCKET_NAME, dayPrefix);
+    
+    if (dayFiles.length > 0) {
+      const indexedCount = indexFiles(dayFiles);
+      console.log(`✅ [AUTO-SYNC] Indexed ${indexedCount}/${dayFiles.length} files for ${today}`);
+    } else {
+      console.log(`📁 [AUTO-SYNC] No files found for ${today}`);
+    }
+  } catch (error) {
+    console.error(`❌ [AUTO-SYNC] Error during current day sync:`, error.message);
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Backend listening on port ${PORT}`);
+  
+  // Start automatic current day sync every 5 minutes
+  console.log(`🕒 [AUTO-SYNC] Starting automatic current day sync (every 5 minutes)`);
+  
+  // Run initial sync after 30 seconds (give server time to fully start)
+  setTimeout(() => {
+    console.log(`🚀 [AUTO-SYNC] Running initial current day sync...`);
+    syncCurrentDay();
+  }, 30000);
+  
+  // Then run every 5 minutes
+  setInterval(syncCurrentDay, 5 * 60 * 1000); // 5 minutes in milliseconds
 });

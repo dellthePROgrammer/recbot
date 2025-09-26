@@ -65,10 +65,5 @@ services:
     # Uncomment to persist logs or mount local folders if needed
     # volumes:
     #   - ./local_wav:/data/wav
+    #   - ./logs:/var/logcbot.db"]   #   - ./local_wav:/data/wav
     #   - ./logs:/var/log
-  sqlite:
-    image: nouchka/sqlite3:latest
-    container_name: sqlite
-    volumes:
-      - ./data/sqlite:/root/db
-    command: ["sqlite3", "/root/db/recbot.db"]

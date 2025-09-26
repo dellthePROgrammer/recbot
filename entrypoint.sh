@@ -57,6 +57,8 @@ if [ "$ENABLE_SFTP" = "true" ] && [ "$STORAGE_TYPE" = "b2" ] && [ -n "$SFTP_USER
   rclone serve sftp b2remote:$B2_BUCKET --addr :2222 --config /root/.config/rclone/rclone.conf --user $SFTP_USER --pass $SFTP_PASS &
 fi
 
+# Create database directory
+mkdir -p /root/db
 
 # Start backend server
 cd /app/backend
