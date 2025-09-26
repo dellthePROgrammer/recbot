@@ -24,6 +24,7 @@ import {
   CircularProgress,
   FormControl,
   InputLabel,
+  Button,
 } from "@mui/material";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -60,7 +61,7 @@ function formatDuration(ms) {
 function App() {
   const [files, setFiles] = useState([]);
   const [playing, setPlaying] = useState(null);
-  const [page, setPage] = useState(1);
+
   const [calendarDateStart, setCalendarDateStart] = useState(null);
   const [calendarDateEnd, setCalendarDateEnd] = useState(null);
   const [timePickerStart, setTimePickerStart] = useState(null);
@@ -76,6 +77,9 @@ function App() {
   const [error500, setError500] = useState(false);
   const [loading, setLoading] = useState(false);
   const [filesPerPage, setFilesPerPage] = useState(25);
+  const [totalCount, setTotalCount] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [currentOffset, setCurrentOffset] = useState(0);
 
   const theme = createTheme({
     palette: {
@@ -84,23 +88,52 @@ function App() {
   });
 
   // Fetch files only when a date is selected or changed
-  const fetchFiles = (start, end) => {
+  const fetchFiles = (start, end, offset = 0, limit = filesPerPage, customSortColumn = null, customSortDirection = null, customDurationMin = null, customPhoneFilter = null, customEmailFilter = null, customTimePickerStart = null, customTimePickerEnd = null, customTimeMode = null) => {
     if (!start) return;
     setLoading(true);
     setError500(false);
+    
     let url = `/api/wav-files?dateStart=${encodeURIComponent(dayjs(start).format("M_D_YYYY"))}`;
     if (end) url += `&dateEnd=${encodeURIComponent(dayjs(end).format("M_D_YYYY"))}`;
+    url += `&offset=${offset}&limit=${limit}`;
+    
+    // Add filters to URL
+    const currentPhoneFilter = customPhoneFilter !== null ? customPhoneFilter : phoneFilter;
+    const currentEmailFilter = customEmailFilter !== null ? customEmailFilter : emailFilter;
+    const currentDurationMin = customDurationMin !== null ? customDurationMin : durationMin;
+    const currentTimePickerStart = customTimePickerStart !== null ? customTimePickerStart : timePickerStart;
+    const currentTimePickerEnd = customTimePickerEnd !== null ? customTimePickerEnd : timePickerEnd;
+    const currentTimeMode = customTimeMode !== null ? customTimeMode : timeMode;
+    
+    if (currentPhoneFilter) url += `&phone=${encodeURIComponent(currentPhoneFilter)}`;
+    if (currentEmailFilter) url += `&email=${encodeURIComponent(currentEmailFilter)}`;
+    if (currentDurationMin) url += `&durationMin=${encodeURIComponent(currentDurationMin)}&durationMode=${durationMode}`;
+    if (currentTimePickerStart || currentTimePickerEnd) {
+      if (currentTimePickerStart) url += `&timeStart=${encodeURIComponent(dayjs(currentTimePickerStart).format("hh:mm:ss A"))}`;
+      if (currentTimePickerEnd) url += `&timeEnd=${encodeURIComponent(dayjs(currentTimePickerEnd).format("hh:mm:ss A"))}`;
+      url += `&timeMode=${currentTimeMode}`;
+    }
+    
+    // Add sorting parameters
+    const currentSortColumn = customSortColumn || sortColumn;
+    const currentSortDirection = customSortDirection || sortDirection;
+    url += `&sortColumn=${encodeURIComponent(currentSortColumn)}&sortDirection=${encodeURIComponent(currentSortDirection)}`;
+    
     fetch(url)
       .then((res) => {
         if (res.status === 500) {
           setError500(true);
           setLoading(false);
-          return [];
+          return { files: [], totalCount: 0, hasMore: false };
         }
         return res.json();
       })
       .then((data) => {
-        setFiles(Array.isArray(data) ? data : []);
+        const result = data.files || data || [];
+        setFiles(Array.isArray(result) ? result : []);
+        setTotalCount(data.totalCount || result.length || 0);
+        setHasMore(data.hasMore || false);
+        setCurrentOffset(data.offset || 0);
         setLoading(false);
       })
       .catch(() => {
@@ -113,7 +146,7 @@ function App() {
   useEffect(() => {
     if (calendarDateStart) {
       fetchFiles(calendarDateStart, calendarDateEnd);
-      setPage(1);
+
     }
     // eslint-disable-next-line
   }, [calendarDateStart, calendarDateEnd]);
@@ -123,131 +156,92 @@ function App() {
     setPlaying(`/api/wav-files/${encodedPath}`);
   };
 
-  // Filtering
-  const filteredFiles = files.filter((file) => {
-    const info = parseFileInfo(file);
+  // Files are now filtered and paginated by the backend
+  const displayFiles = files;
 
-    // Date filter logic (range)
-    let dateMatch = true;
-    if (calendarDateStart && calendarDateEnd) {
-      const fileDate = dayjs(info.date, "M/D/YYYY");
-      dateMatch =
-        fileDate.isValid() &&
-        !fileDate.isBefore(dayjs(calendarDateStart).startOf("day")) &&
-        !fileDate.isAfter(dayjs(calendarDateEnd).endOf("day"));
-    } else if (calendarDateStart) {
-      const fileDate = dayjs(info.date, "M/D/YYYY");
-      dateMatch =
-        fileDate.isValid() &&
-        fileDate.isSame(dayjs(calendarDateStart), "day");
-    }
-
-    // Time filter logic
-    let timeMatch = true;
-    if (info.time) {
-      const fileTime = dayjs(info.time, "hh:mm:ss A");
-      const startTime = timePickerStart ? dayjs(timePickerStart, "hh:mm:ss A") : null;
-      const endTime = timePickerEnd ? dayjs(timePickerEnd, "hh:mm:ss A") : null;
-
-      if (timeMode === "range" && startTime && endTime) {
-        timeMatch =
-          fileTime.isValid() &&
-          !fileTime.isBefore(startTime) &&
-          !fileTime.isAfter(endTime);
-      } else if (timeMode === "Older" && startTime) {
-        timeMatch = fileTime.isValid() && !fileTime.isAfter(startTime);
-      } else if (timeMode === "Newer" && startTime) {
-        timeMatch = fileTime.isValid() && !fileTime.isBefore(startTime);
-      }
-    }
-
-    // Duration filter logic (min or max)
-    let durationMatch = true;
-    const durationSec = Math.floor(info.durationMs / 1000);
-    if (durationMin !== "" && !isNaN(durationMin)) {
-      if (durationMode === "min") {
-        durationMatch = durationSec >= Number(durationMin);
-      } else {
-        durationMatch = durationSec <= Number(durationMin);
-      }
-    }
-
-    // Phone filter (partial match, ignore empty)
-    let phoneMatch = true;
-    if (phoneFilter.trim() !== "") {
-      phoneMatch = info.phone.toLowerCase().includes(phoneFilter.toLowerCase());
-    }
-
-    // Email filter (partial match, ignore empty)
-    let emailMatch = true;
-    if (emailFilter.trim() !== "") {
-      emailMatch = info.email.toLowerCase().includes(emailFilter.toLowerCase());
-    }
-
-    return (
-      dateMatch &&
-      timeMatch &&
-      phoneMatch &&
-      emailMatch &&
-      durationMatch
-    );
-  });
-
-  // Sorting
-  const sortedFiles = [...filteredFiles].sort((a, b) => {
-    const infoA = parseFileInfo(a);
-    const infoB = parseFileInfo(b);
-    let valA = infoA[sortColumn];
-    let valB = infoB[sortColumn];
-
-    if (sortColumn === "durationMs") {
-      valA = Number(valA);
-      valB = Number(valB);
-    } else if (sortColumn === "time") {
-      const timeA = dayjs(valA, "hh:mm:ss A");
-      const timeB = dayjs(valB, "hh:mm:ss A");
-      if (timeA.isValid() && timeB.isValid()) {
-        if (timeA.isBefore(timeB)) return sortDirection === "asc" ? -1 : 1;
-        if (timeA.isAfter(timeB)) return sortDirection === "asc" ? 1 : -1;
-        return 0;
-      }
-      valA = valA || "";
-      valB = valB || "";
-    } else {
-      valA = valA || "";
-      valB = valB || "";
-    }
-
-    if (valA < valB) return sortDirection === "asc" ? -1 : 1;
-    if (valA > valB) return sortDirection === "asc" ? 1 : -1;
-    return 0;
-  });
-
-  // Pagination
-  const pageCount = Math.max(1, Math.ceil(sortedFiles.length / filesPerPage));
-  const paginatedFiles = sortedFiles.slice((page - 1) * filesPerPage, page * filesPerPage);
+  // Backend handles sorting and pagination now
+  const pageCount = Math.max(1, Math.ceil(totalCount / filesPerPage));
+  const currentPage = Math.floor(currentOffset / filesPerPage) + 1;
 
   // Handlers
   const handleDarkModeToggle = () => setDarkMode((prev) => !prev);
-  const handleCalendarDateStart = (newValue) => { setCalendarDateStart(newValue); setPage(1); };
-  const handleCalendarDateEnd = (newValue) => { setCalendarDateEnd(newValue); setPage(1); };
-  const handlePhoneFilter = (e) => { setPhoneFilter(e.target.value); setPage(1); };
-  const handleEmailFilter = (e) => { setEmailFilter(e.target.value); setPage(1); };
-  const handleSort = (column) => {
-    if (sortColumn === column) {
-      setSortDirection(sortDirection === "asc" ? "desc" : "asc");
-    } else {
-      setSortColumn(column);
-      setSortDirection("asc");
-    }
-    setPage(1);
+  
+  const refreshFiles = (resetOffset = true) => {
+    const offset = resetOffset ? 0 : currentOffset;
+    if (resetOffset) setCurrentOffset(0);
+    fetchFiles(calendarDateStart, calendarDateEnd, offset, filesPerPage);
   };
 
-  useEffect(() => {
-    const maxPage = Math.max(1, Math.ceil(filteredFiles.length / filesPerPage));
-    if (page > maxPage) setPage(1);
-    // eslint-disable-next-line
-  }, [filteredFiles.length, filesPerPage]);
+
+
+  const handleCalendarDateStart = (newValue) => { 
+    setCalendarDateStart(newValue); 
+    setCurrentOffset(0);
+    if (newValue) refreshFiles(true);
+  };
+  
+  const handleCalendarDateEnd = (newValue) => { 
+    setCalendarDateEnd(newValue); 
+    setCurrentOffset(0);
+    if (calendarDateStart) refreshFiles(true);
+  };
+  
+  const handlePhoneFilter = (e) => { 
+    const newValue = e.target.value;
+    setPhoneFilter(newValue); 
+    setCurrentOffset(0);
+    // Call fetchFiles directly with the new phone filter value to avoid async state issues
+    if (calendarDateStart) {
+      fetchFiles(calendarDateStart, calendarDateEnd, 0, filesPerPage, null, null, null, newValue);
+    }
+  };
+  
+  const handleEmailFilter = (e) => { 
+    const newValue = e.target.value;
+    setEmailFilter(newValue); 
+    setCurrentOffset(0);
+    // Call fetchFiles directly with the new email filter value to avoid async state issues
+    if (calendarDateStart) {
+      fetchFiles(calendarDateStart, calendarDateEnd, 0, filesPerPage, null, null, null, null, newValue);
+    }
+  };
+
+  const handleDurationFilter = (value) => {
+    setDurationMin(value);
+    setCurrentOffset(0);
+    // Call fetchFiles directly with the new duration value to avoid async state issues
+    if (calendarDateStart) {
+      fetchFiles(calendarDateStart, calendarDateEnd, 0, filesPerPage, null, null, value);
+    }
+  };
+
+
+
+  const handlePageChange = (event, newPage) => {
+    const newOffset = (newPage - 1) * filesPerPage;
+    setCurrentOffset(newOffset);
+    fetchFiles(calendarDateStart, calendarDateEnd, newOffset, filesPerPage);
+  };
+
+  const handleSort = (column) => {
+    let newDirection;
+    if (sortColumn === column) {
+      newDirection = sortDirection === "asc" ? "desc" : "asc";
+      setSortDirection(newDirection);
+    } else {
+      setSortColumn(column);
+      newDirection = "asc";
+      setSortDirection("asc");
+    }
+    setCurrentOffset(0);
+    
+    // Call fetchFiles directly with the new sort values to avoid async state issues
+    if (calendarDateStart) {
+      fetchFiles(calendarDateStart, calendarDateEnd, 0, filesPerPage, column, newDirection);
+    }
+  };
+
+  // No need for useEffect to adjust page since backend handles pagination
 
   return (
     <ThemeProvider theme={theme}>
@@ -271,7 +265,7 @@ function App() {
               <IconButton
                 aria-label="Refresh"
                 color="primary"
-                onClick={() => fetchFiles(calendarDateStart, calendarDateEnd)}
+                onClick={() => refreshFiles(true)}
                 title="Refresh file list"
               >
                 <RefreshIcon />
@@ -306,7 +300,13 @@ function App() {
                   <TimePicker
                     label={timeMode === "range" ? "Start time" : timeMode}
                     value={timePickerStart}
-                    onChange={setTimePickerStart}
+                    onChange={(value) => { 
+                      setTimePickerStart(value); 
+                      setCurrentOffset(0);
+                      if (calendarDateStart) {
+                        fetchFiles(calendarDateStart, calendarDateEnd, 0, filesPerPage, null, null, null, null, null, value);
+                      }
+                    }}
                     slotProps={{ textField: { size: "small", fullWidth: true } }}
                     format="hh:mm:ss A"
                   />
@@ -314,7 +314,13 @@ function App() {
                     <TimePicker
                       label="End time"
                       value={timePickerEnd}
-                      onChange={setTimePickerEnd}
+                      onChange={(value) => { 
+                        setTimePickerEnd(value); 
+                        setCurrentOffset(0);
+                        if (calendarDateStart) {
+                          fetchFiles(calendarDateStart, calendarDateEnd, 0, filesPerPage, null, null, null, null, null, null, value);
+                        }
+                      }}
                       slotProps={{ textField: { size: "small", fullWidth: true } }}
                       format="hh:mm:ss A"
                       sx={{ ml: 1 }}
@@ -322,7 +328,14 @@ function App() {
                   )}
                   <Select
                     value={timeMode}
-                    onChange={e => setTimeMode(e.target.value)}
+                    onChange={e => { 
+                      const newValue = e.target.value;
+                      setTimeMode(newValue); 
+                      setCurrentOffset(0);
+                      if (calendarDateStart) {
+                        fetchFiles(calendarDateStart, calendarDateEnd, 0, filesPerPage, null, null, null, null, null, null, null, newValue);
+                      }
+                    }}
                     size="small"
                     sx={{ minWidth: 90, ml: 1 }}
                   >
@@ -341,7 +354,7 @@ function App() {
                   fullWidth
                   type="number"
                   value={durationMin}
-                  onChange={e => setDurationMin(e.target.value)}
+                  onChange={e => handleDurationFilter(e.target.value)}
                   InputProps={{
                     endAdornment: <InputAdornment position="end">sec</InputAdornment>,
                     inputProps: { min: 0 }
@@ -351,7 +364,13 @@ function App() {
                 />
                 <Select
                   value={durationMode}
-                  onChange={e => setDurationMode(e.target.value)}
+                  onChange={e => { 
+                    setDurationMode(e.target.value); 
+                    setCurrentOffset(0);
+                    if (calendarDateStart) {
+                      fetchFiles(calendarDateStart, calendarDateEnd, 0, filesPerPage, null, null, durationMin);
+                    }
+                  }}
                   size="small"
                   sx={{ minWidth: 70 }}
                 >
@@ -390,12 +409,21 @@ function App() {
                 labelId="files-per-page-label"
                 value={filesPerPage}
                 label="Files per page"
-                onChange={e => setFilesPerPage(Number(e.target.value))}
+                onChange={e => {
+                  const newLimit = Number(e.target.value);
+                  setFilesPerPage(newLimit);
+                  setCurrentOffset(0);
+                  if (calendarDateStart) {
+                    fetchFiles(calendarDateStart, calendarDateEnd, 0, newLimit, false);
+                  }
+                }}
               >
                 <MenuItem value={25}>25</MenuItem>
                 <MenuItem value={50}>50</MenuItem>
-                <MenuItem value={75}>75</MenuItem>
                 <MenuItem value={100}>100</MenuItem>
+                <MenuItem value={250}>250</MenuItem>
+                <MenuItem value={500}>500</MenuItem>
+                <MenuItem value={1000}>1000</MenuItem>
               </Select>
             </FormControl>
           </Box>
@@ -463,7 +491,7 @@ function App() {
                       </TableRow>
                     </TableHead>
                     <TableBody>
-                      {paginatedFiles.map((file) => {
+                      {displayFiles.map((file) => {
                         const info = parseFileInfo(file);
                         const encodedFile = `/api/wav-files/${file.split('/').map(encodeURIComponent).join('/')}`;
                         const isPlaying = playing === encodedFile;
@@ -503,18 +531,21 @@ function App() {
                   </Table>
                 </TableContainer>
                 {(pageCount > 1) && (
-                  <Box display="flex" justifyContent="center" mt={2}>
+                  <Box display="flex" justifyContent="center" alignItems="center" mt={2} gap={2}>
                     <Pagination
                       count={pageCount}
-                      page={page}
-                      onChange={(e, value) => setPage(value)}
+                      page={currentPage}
+                      onChange={handlePageChange}
                       color="primary"
                       siblingCount={1}
                       boundaryCount={1}
                     />
+                    <Typography variant="body2" color="text.secondary">
+                      Showing {displayFiles.length} of {totalCount} files
+                    </Typography>
                   </Box>
                 )}
-                {sortedFiles.length === 0 && (
+                {displayFiles.length === 0 && (
                   <Typography variant="body1" color="text.secondary" align="center">
                     No files found for your search or filters.
                   </Typography>

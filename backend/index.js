@@ -15,7 +15,6 @@ import {
   PutObjectCommand,
   HeadObjectCommand
 } from "@aws-sdk/client-s3";
-import authRouter from "./auth.js";
 
 dayjs.extend(customParseFormat);
 dayjs.extend(isSameOrBefore);
@@ -26,7 +25,6 @@ const BUILD_DIR = path.join(process.cwd(), '../frontend/build');
 const WAV_DIR = '/data/wav/recordings'; // For reference, not used with S3
 
 app.use(cors());
-app.use(authRouter);
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 
@@ -150,7 +148,22 @@ app.get('/api/wav-files', async (req, res) => {
   try {
     const BUCKET_NAME = process.env.AWS_BUCKET;
     let PREFIX = 'recordings/';
-    const { dateStart, dateEnd } = req.query;
+    const { 
+      dateStart, 
+      dateEnd, 
+      offset = 0, 
+      limit = 25,
+      phone,
+      email,
+      durationMin,
+      durationMode = "min",
+      timeStart,
+      timeEnd,
+      timeMode = "range",
+      sortColumn = "date",
+      sortDirection = "asc"
+    } = req.query;
+    
     let files = [];
 
     if (dateStart && !dateEnd) {
@@ -170,10 +183,126 @@ app.get('/api/wav-files', async (req, res) => {
       files = await listWavFilesFromS3(BUCKET_NAME, PREFIX);
     }
 
-    res.json(files);
+    // Apply filters
+    const filteredFiles = files.filter(file => {
+      const cleanFile = file.startsWith('recordings/') ? file.slice('recordings/'.length) : file;
+      const [folder, filename] = cleanFile.split('/');
+      if (!folder || !filename) return false;
+
+      const date = folder.replace(/_/g, '/');
+      const phoneMatch = filename.match(/^(\d+)/);
+      const filePhone = phoneMatch ? phoneMatch[1] : '';
+      const emailMatch = filename.match(/by ([^@]+@[^ ]+)/);
+      const fileEmail = emailMatch ? emailMatch[1] : '';
+      const timeMatch = filename.match(/@ ([\d_]+ [AP]M)/);
+      const time = timeMatch ? timeMatch[1].replace(/_/g, ':') : '';
+      const durationMatch = filename.match(/_(\d+)\.wav$/);
+      const durationMs = durationMatch ? parseInt(durationMatch[1], 10) : 0;
+      const durationSec = Math.floor(durationMs / 1000);
+
+      // Phone filter
+      if (phone && !filePhone.toLowerCase().includes(phone.toLowerCase())) return false;
+
+      // Email filter
+      if (email && !fileEmail.toLowerCase().includes(email.toLowerCase())) return false;
+
+      // Duration filter
+      if (durationMin && !isNaN(durationMin)) {
+        if (durationMode === "min" && durationSec < Number(durationMin)) return false;
+        if (durationMode === "max" && durationSec > Number(durationMin)) return false;
+      }
+
+      // Time filter
+      if (time && (timeStart || timeEnd)) {
+        const fileTime = dayjs(time, "hh:mm:ss A");
+        const startTime = timeStart ? dayjs(timeStart, "hh:mm:ss A") : null;
+        const endTime = timeEnd ? dayjs(timeEnd, "hh:mm:ss A") : null;
+
+        if (timeMode === "range" && startTime && endTime) {
+          if (!fileTime.isValid() || fileTime.isBefore(startTime) || fileTime.isAfter(endTime)) return false;
+        } else if (timeMode === "Older" && startTime) {
+          if (!fileTime.isValid() || fileTime.isAfter(startTime)) return false;
+        } else if (timeMode === "Newer" && startTime) {
+          if (!fileTime.isValid() || fileTime.isBefore(startTime)) return false;
+        }
+      }
+
+      return true;
+    });
+
+    // Apply sorting
+    const sortedFiles = [...filteredFiles].sort((a, b) => {
+      const cleanFileA = a.startsWith('recordings/') ? a.slice('recordings/'.length) : a;
+      const cleanFileB = b.startsWith('recordings/') ? b.slice('recordings/'.length) : b;
+      const [folderA, filenameA] = cleanFileA.split('/');
+      const [folderB, filenameB] = cleanFileB.split('/');
+      
+      if (!folderA || !filenameA || !folderB || !filenameB) return 0;
+
+      let valA, valB;
+
+      if (sortColumn === "date") {
+        const dateA = folderA.replace(/_/g, '/');
+        const dateB = folderB.replace(/_/g, '/');
+        valA = dayjs(dateA, "M/D/YYYY").valueOf();
+        valB = dayjs(dateB, "M/D/YYYY").valueOf();
+      } else if (sortColumn === "phone") {
+        const phoneMatchA = filenameA.match(/^(\d+)/);
+        const phoneMatchB = filenameB.match(/^(\d+)/);
+        valA = phoneMatchA ? phoneMatchA[1] : '';
+        valB = phoneMatchB ? phoneMatchB[1] : '';
+      } else if (sortColumn === "email") {
+        const emailMatchA = filenameA.match(/by ([^@]+@[^ ]+)/);
+        const emailMatchB = filenameB.match(/by ([^@]+@[^ ]+)/);
+        valA = emailMatchA ? emailMatchA[1] : '';
+        valB = emailMatchB ? emailMatchB[1] : '';
+      } else if (sortColumn === "time") {
+        const timeMatchA = filenameA.match(/@ ([\d_]+ [AP]M)/);
+        const timeMatchB = filenameB.match(/@ ([\d_]+ [AP]M)/);
+        const timeA = timeMatchA ? timeMatchA[1].replace(/_/g, ':') : '';
+        const timeB = timeMatchB ? timeMatchB[1].replace(/_/g, ':') : '';
+        valA = timeA ? dayjs(timeA, "hh:mm:ss A").valueOf() : 0;
+        valB = timeB ? dayjs(timeB, "hh:mm:ss A").valueOf() : 0;
+      } else if (sortColumn === "durationMs") {
+        const durationMatchA = filenameA.match(/_(\d+)\.wav$/);
+        const durationMatchB = filenameB.match(/_(\d+)\.wav$/);
+        valA = durationMatchA ? parseInt(durationMatchA[1], 10) : 0;
+        valB = durationMatchB ? parseInt(durationMatchB[1], 10) : 0;
+      } else {
+        valA = a;
+        valB = b;
+      }
+
+      // Handle string vs number comparison
+      if (typeof valA === 'string' && typeof valB === 'string') {
+        valA = valA.toLowerCase();
+        valB = valB.toLowerCase();
+      }
+
+      let result = 0;
+      if (valA < valB) result = -1;
+      else if (valA > valB) result = 1;
+
+      return sortDirection === "desc" ? -result : result;
+    });
+
+    // Apply offset-based pagination
+    const offsetNum = parseInt(offset, 10) || 0;
+    const limitNum = parseInt(limit, 10) || 25;
+    const totalCount = sortedFiles.length;
+    const paginatedFiles = sortedFiles.slice(offsetNum, offsetNum + limitNum);
+    const hasMore = offsetNum + limitNum < totalCount;
+
+    res.json({
+      files: paginatedFiles,
+      totalCount,
+      offset: offsetNum,
+      limit: limitNum,
+      hasMore
+    });
   } catch (err) {
     console.error('Error in /api/wav-files:', err);
-    res.status(500).json([]);
+    res.status(500).json({ files: [], totalCount: 0, offset: 0, limit: 25, hasMore: false });
   }
 });
 

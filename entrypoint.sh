@@ -57,8 +57,6 @@ if [ "$ENABLE_SFTP" = "true" ] && [ "$STORAGE_TYPE" = "b2" ] && [ -n "$SFTP_USER
   rclone serve sftp b2remote:$B2_BUCKET --addr :2222 --config /root/.config/rclone/rclone.conf --user $SFTP_USER --pass $SFTP_PASS &
 fi
 
-# Run BetterAuth DB migrations
-npx @better-auth/cli migrate --sqlite /root/db/recbot.db
 
 # Start backend server
 cd /app/backend
