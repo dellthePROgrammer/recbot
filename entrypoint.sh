@@ -61,3 +61,6 @@ fi
 # Start backend server
 cd /app/backend
 exec npm start
+
+
+

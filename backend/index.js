@@ -164,6 +164,11 @@ app.get('/api/wav-files', async (req, res) => {
       sortDirection = "asc"
     } = req.query;
     
+    // Debug phone filter
+    if (phone) {
+      console.log('Phone filter received:', JSON.stringify(phone), 'Type:', typeof phone);
+    }
+    
     let files = [];
 
     if (dateStart && !dateEnd) {
@@ -201,7 +206,12 @@ app.get('/api/wav-files', async (req, res) => {
       const durationSec = Math.floor(durationMs / 1000);
 
       // Phone filter
-      if (phone && !filePhone.toLowerCase().includes(phone.toLowerCase())) return false;
+      if (phone && phone.trim() !== "") {
+        const phoneSearch = phone.trim();
+        if (!filePhone.includes(phoneSearch)) {
+          return false;
+        }
+      }
 
       // Email filter
       if (email && !fileEmail.toLowerCase().includes(email.toLowerCase())) return false;
