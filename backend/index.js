@@ -16,7 +16,7 @@ import {
   HeadObjectCommand
 } from "@aws-sdk/client-s3";
 import { queryFiles, indexFiles, indexFile, getDatabaseStats } from './database.js';
-import { clerkAuth, requireAuth, requireAdmin, requireMemberOrAdmin } from './auth.js';
+import { clerkAuth, requireAuth, requireAdmin, requireMemberOrAdmin, requireAuthenticatedUser, requireManagerOrAdmin } from './auth.js';
 
 dayjs.extend(customParseFormat);
 dayjs.extend(isSameOrBefore);
@@ -61,7 +61,7 @@ async function listWavFilesFromS3(bucket, prefix = "") {
 
 // Stream a .wav file, transcoding and caching in S3 if needed
 // Audio streaming endpoint with role-based access control
-app.get('/api/audio/*', requireAuth, requireMemberOrAdmin, async (req, res) => {
+app.get('/api/audio/*', requireAuth, requireAuthenticatedUser, async (req, res) => {
   try {
     const filename = decodeURIComponent(req.params[0]);
     const BUCKET_NAME = process.env.AWS_BUCKET;
@@ -71,11 +71,16 @@ app.get('/api/audio/*', requireAuth, requireMemberOrAdmin, async (req, res) => {
       // Members can only access files that contain their email address
       if (!filename.includes(req.user.email)) {
         console.log(`🚫 [ACCESS DENIED] Member ${req.user.email} tried to access file: ${filename}`);
-        return res.status(403).json({ error: 'Access denied. You can only access your own recordings.' });
+        return res.status(403).json({ error: 'Forbidden' });
       }
       console.log(`🎵 [MEMBER ACCESS] User ${req.user.email} accessing their file: ${filename}`);
     } else if (req.user.role === 'admin') {
       console.log(`👑 [ADMIN ACCESS] Admin ${req.user.email} accessing file: ${filename}`);
+    } else if (req.user.role === 'manager') {
+      console.log(`📋 [MANAGER ACCESS] Manager ${req.user.email} accessing file: ${filename}`);
+    } else {
+      // Users with no role can access all files for listening only
+      console.log(`🎧 [GUEST ACCESS] User ${req.user.email} accessing file: ${filename}`);
     }
 
     const s3Key = filename.startsWith('recordings/') ? filename : `recordings/${filename}`;
@@ -96,6 +101,8 @@ app.get('/api/audio/*', requireAuth, requireMemberOrAdmin, async (req, res) => {
       if (s3Response.ContentRange) res.setHeader('Content-Range', s3Response.ContentRange);
       res.setHeader('Accept-Ranges', 'bytes');
       res.setHeader('Content-Disposition', `inline; filename="${s3Key.split('/').pop()}"`);
+
+      s3Response.Body.pipe(res);
 
       s3Response.Body.pipe(res);
       return;
@@ -169,9 +176,38 @@ app.get('/api/audio/*', requireAuth, requireMemberOrAdmin, async (req, res) => {
   }
 });
 
-// List .wav files from S3, supporting date range queries
+// Download endpoint with role-based access control
+app.get('/api/download/*', requireAuth, requireManagerOrAdmin, async (req, res) => {
+  try {
+    const filename = decodeURIComponent(req.params[0]);
+    const BUCKET_NAME = process.env.AWS_BUCKET;
+    
+    console.log(`📥 [DOWNLOAD] User ${req.user.email} (${req.user.role}) downloading: ${filename}`);
+
+    const s3Key = filename.startsWith('recordings/') ? filename : `recordings/${filename}`;
+    
+    // Force download with proper headers
+    try {
+      const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: s3Key });
+      const s3Response = await s3.send(command);
+
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Disposition', `attachment; filename="${s3Key.split('/').pop()}"`);
+      res.setHeader('Content-Length', s3Response.ContentLength || 0);
+
+      s3Response.Body.pipe(res);
+    } catch (error) {
+      console.error('Download error:', error);
+      res.status(404).json({ error: 'File not found' });
+    }
+  } catch (err) {
+    console.error('Error downloading file:', err);
+    res.status(500).json({ error: 'Download failed' });
+  }
+});
+
 // High-performance files endpoint using database - requires authentication
-app.get('/api/wav-files', requireAuth, requireMemberOrAdmin, async (req, res) => {
+app.get('/api/wav-files', requireAuth, requireAuthenticatedUser, async (req, res) => {
   try {
     const {
       dateStart,
@@ -189,16 +225,13 @@ app.get('/api/wav-files', requireAuth, requireMemberOrAdmin, async (req, res) =>
       sortDirection = "desc"
     } = req.query;
 
-    // Role-based email filtering
+    // Email filtering - allow all users to view all files (no email filtering)
     let effectiveEmail = email?.trim() || null;
     
-    // Members can only see files with their email address
-    if (req.user.role === 'member') {
-      effectiveEmail = req.user.email;
-      console.log(`🔒 [MEMBER ACCESS] User ${req.user.email} accessing their files only`);
-    } else if (req.user.role === 'admin') {
-      console.log(`👑 [ADMIN ACCESS] User ${req.user.email} accessing all files`);
-    }
+    // All authenticated users can view all files
+    console.log(`� [USER ACCESS] User ${req.user.email} accessing all files (view-only)`);
+    
+    // Note: Download protection is handled at the audio streaming level
 
     // Use database query for ultra-fast results
     const result = queryFiles({

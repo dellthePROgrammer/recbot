@@ -36,6 +36,7 @@ import StopIcon from "@mui/icons-material/Stop";
 import VolumeUpIcon from "@mui/icons-material/VolumeUp";
 import FastForwardIcon from "@mui/icons-material/FastForward";
 import FastRewindIcon from "@mui/icons-material/FastRewind";
+import DownloadIcon from "@mui/icons-material/Download";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
@@ -76,6 +77,8 @@ function FileViewer({ darkMode }) {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0.5); // Default volume 50%
+  const [waveformData, setWaveformData] = useState(null); // Audio waveform data
+  const [isGeneratingWaveform, setIsGeneratingWaveform] = useState(false);
 
   const [calendarDateStart, setCalendarDateStart] = useState(null);
   const [calendarDateEnd, setCalendarDateEnd] = useState(null);
@@ -95,10 +98,11 @@ function FileViewer({ darkMode }) {
   const [hasMore, setHasMore] = useState(false);
   const [currentOffset, setCurrentOffset] = useState(0);
 
-  // Get user role and email for filtering
+  // Get user role for admin features
   const userRole = user?.publicMetadata?.role;
-  const userEmail = user?.emailAddresses?.[0]?.emailAddress;
   const isAdmin = userRole === 'admin';
+  const isManager = userRole === 'manager';
+  const canDownload = isAdmin || isManager;
 
   // Fetch files only when a date is selected or changed
   const fetchFiles = (start, end, offset = 0, limit = filesPerPage, customSortColumn = null, customSortDirection = null, customDurationMin = null, customPhoneFilter = null, customEmailFilter = null, customTimePickerStart = null, customTimePickerEnd = null, customTimeMode = null) => {
@@ -109,10 +113,12 @@ function FileViewer({ darkMode }) {
     let url = `/api/wav-files?dateStart=${encodeURIComponent(dayjs(start).format("M_D_YYYY"))}`;
     if (end) url += `&dateEnd=${encodeURIComponent(dayjs(end).format("M_D_YYYY"))}`;
     
-    // Add role-based email filtering for members
-    const effectiveEmailFilter = isAdmin 
+    // Add role-based email filtering
+    // Only members are restricted to their own files
+    // Admins, managers, and users with no role can see all files
+    const effectiveEmailFilter = isAdmin || userRole === undefined
       ? (customEmailFilter !== null ? customEmailFilter : emailFilter)
-      : userEmail; // Members can only see their own files
+      : userEmail; // Only members are restricted to their own files
     
     url += `&offset=${offset}&limit=${limit}`;
     url += `&sortBy=${customSortColumn || sortColumn}&sortOrder=${customSortDirection || sortDirection}`;
@@ -189,6 +195,70 @@ function FileViewer({ darkMode }) {
     fetchFiles(calendarDateStart, calendarDateEnd, newOffset);
   };
 
+  // Generate waveform data from audio blob
+  const generateWaveformData = async (audioBlob, filename) => {
+    try {
+      setIsGeneratingWaveform(true);
+      
+      // Create audio context for analysis
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const arrayBuffer = await audioBlob.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      
+      // Get channel data (use first channel for mono, or mix channels for stereo)
+      const channelData = audioBuffer.getChannelData(0);
+      const sampleRate = audioBuffer.sampleRate;
+      const duration = audioBuffer.duration;
+      
+      // Create waveform with desired resolution (pixels wide)
+      const waveformWidth = 800; // Match our player width
+      const samplesPerPixel = Math.floor(channelData.length / waveformWidth);
+      const waveform = [];
+      
+      for (let i = 0; i < waveformWidth; i++) {
+        const startSample = i * samplesPerPixel;
+        const endSample = Math.min(startSample + samplesPerPixel, channelData.length);
+        
+        // Calculate RMS (Root Mean Square) for this pixel
+        let sum = 0;
+        let count = 0;
+        for (let j = startSample; j < endSample; j++) {
+          sum += channelData[j] * channelData[j];
+          count++;
+        }
+        
+        const rms = count > 0 ? Math.sqrt(sum / count) : 0;
+        // Normalize and apply some smoothing
+        const amplitude = Math.min(1, rms * 3); // Amplify quiet sounds
+        waveform.push(amplitude);
+      }
+      
+      // Store waveform data with metadata
+      setWaveformData({
+        data: waveform,
+        duration: duration,
+        filename: filename,
+        sampleRate: sampleRate
+      });
+      
+      console.log('Waveform generated:', {
+        filename,
+        duration,
+        dataPoints: waveform.length,
+        maxAmplitude: Math.max(...waveform),
+        avgAmplitude: waveform.reduce((a, b) => a + b, 0) / waveform.length
+      });
+      
+      // Clean up audio context
+      audioContext.close();
+      
+    } catch (error) {
+      console.error('Failed to generate waveform:', error);
+    } finally {
+      setIsGeneratingWaveform(false);
+    }
+  };
+
   const playAudio = async (filename) => {
     // Stop current audio if playing
     if (playing) {
@@ -197,6 +267,9 @@ function FileViewer({ darkMode }) {
       setIsPlaying(false);
       setCurrentTrack(null);
     }
+
+    // Clear old waveform data when starting new track
+    setWaveformData(null);
 
     try {
       // Get authentication token
@@ -223,6 +296,9 @@ function FileViewer({ darkMode }) {
       audio.src = audioUrl;
       audio.volume = volume; // Set initial volume
       
+      // Generate waveform data
+      generateWaveformData(audioBlob, filename);
+      
       // Set up event listeners
       audio.addEventListener('loadedmetadata', () => {
         setDuration(audio.duration);
@@ -237,6 +313,7 @@ function FileViewer({ darkMode }) {
         setIsPlaying(false);
         setCurrentTrack(null);
         setCurrentTime(0);
+        setWaveformData(null); // Clear waveform data
         URL.revokeObjectURL(audioUrl); // Clean up blob URL
       });
       
@@ -245,6 +322,7 @@ function FileViewer({ darkMode }) {
         setPlaying(null);
         setIsPlaying(false);
         setCurrentTrack(null);
+        setWaveformData(null); // Clear waveform data
       });
       
       // Start playback
@@ -280,6 +358,7 @@ function FileViewer({ darkMode }) {
       setIsPlaying(false);
       setCurrentTrack(null);
       setCurrentTime(0);
+      setWaveformData(null); // Clear waveform data
     }
   };
 
@@ -320,6 +399,44 @@ function FileViewer({ darkMode }) {
       const clampedTime = Math.max(0, Math.min(newTime, duration));
       playing.currentTime = clampedTime;
       setCurrentTime(clampedTime);
+    }
+  };
+
+  const downloadFile = async (filename) => {
+    if (!canDownload) {
+      return;
+    }
+
+    try {
+      const token = await getToken();
+      const response = await fetch(`/api/download/${encodeURIComponent(filename)}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (!response.ok) {
+        if (response.status === 403) {
+          return;
+        } else {
+          alert('Failed to download file. Please try again.');
+        }
+        return;
+      }
+
+      // Create download link
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename.split('/').pop();
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (error) {
+      console.error('Download error:', error);
+      alert('Failed to download file. Please try again.');
     }
   };
 
@@ -414,22 +531,11 @@ function FileViewer({ darkMode }) {
     );
   }
 
-  if (!userRole) {
-    return (
-      <Box sx={{ p: 3, maxWidth: 600, mx: 'auto', mt: 4 }}>
-        <Alert severity="warning">
-          <Typography variant="h6">Access Pending</Typography>
-          <Typography>Your account needs to be assigned a role. Please contact an administrator.</Typography>
-        </Alert>
-      </Box>
-    );
-  }
-
   return (
     <LocalizationProvider dateAdapter={AdapterDayjs}>
       <Container maxWidth="xl" sx={{ py: 4 }}>
         <Typography variant="h4" gutterBottom>
-          Audio Recordings {!isAdmin && '(Your Files Only)'}
+          Audio Recordings {isAdmin && '(Admin View)'}
         </Typography>
         
         {/* Audio Player */}
@@ -443,66 +549,162 @@ function FileViewer({ darkMode }) {
               transform: 'translateX(-50%)', 
               p: 2, 
               zIndex: 1000,
-              minWidth: 400,
-              maxWidth: 500,
+              minWidth: 600,
+              maxWidth: 800,
               background: darkMode ? '#424242' : '#fff'
             }}
           >
             <Box>
-              <Typography variant="subtitle2" noWrap sx={{ mb: 1 }}>
+              <Typography variant="subtitle2" noWrap sx={{ mb: 2 }}>
                 Now Playing: {currentTrack.split('/').pop()}
+                {waveformData && (
+                  <span style={{ fontSize: '0.7em', opacity: 0.7, marginLeft: '10px' }}>
+                    (Waveform: {waveformData.data.length} points)
+                  </span>
+                )}
               </Typography>
               
-              <Box display="flex" alignItems="center" gap={1}>
-                <IconButton onClick={seekBackward} size="small" title="Rewind 10s">
-                  <FastRewindIcon />
-                </IconButton>
-                
-                <IconButton 
-                  onClick={isPlaying ? pauseAudio : resumeAudio} 
-                  color="primary"
-                  size="small"
+              {/* Waveform Seek Bar Row - Full Width */}
+              <Box sx={{ mb: 2 }}>
+                <Box 
+                  onClick={handleProgressClick}
+                  sx={{ 
+                    cursor: 'pointer',
+                    py: 2,
+                    position: 'relative',
+                    height: 60, // Taller for waveform
+                    backgroundColor: darkMode ? '#333' : '#f5f5f5',
+                    borderRadius: 3,
+                    overflow: 'hidden',
+                    '&:hover': {
+                      backgroundColor: darkMode ? '#404040' : '#eeeeee'
+                    }
+                  }}
                 >
-                  {isPlaying ? <PauseIcon /> : <PlayArrowIcon />}
-                </IconButton>
-                
-                <IconButton onClick={seekForward} size="small" title="Forward 10s">
-                  <FastForwardIcon />
-                </IconButton>
-                
-                <IconButton onClick={stopAudio} size="small">
-                  <StopIcon />
-                </IconButton>
-                
-                <Box sx={{ flexGrow: 1, mx: 2 }}>
-                  <Box 
-                    onClick={handleProgressClick}
-                    sx={{ 
-                      cursor: 'pointer',
-                      py: 1, // Add some padding for easier clicking
-                      '&:hover .progress-bar': {
-                        opacity: 0.8
-                      }
-                    }}
-                  >
-                    <LinearProgress 
-                      className="progress-bar"
-                      variant="determinate" 
-                      value={duration ? (currentTime / duration) * 100 : 0}
-                      sx={{ 
-                        height: 6, 
-                        borderRadius: 3,
-                        transition: 'opacity 0.2s'
-                      }}
-                    />
-                  </Box>
+                  {/* Waveform Visualization */}
+                  {waveformData && waveformData.filename === currentTrack ? (
+                    <Box sx={{ 
+                      position: 'absolute', 
+                      top: 0, 
+                      left: 0, 
+                      right: 0, 
+                      bottom: 0,
+                      display: 'flex',
+                      alignItems: 'flex-end', // Align bars to bottom
+                      justifyContent: 'space-between',
+                      px: 1,
+                      gap: 0.1
+                    }}>
+                      {/* Waveform bars */}
+                      {waveformData.data.map((amplitude, index) => (
+                        <Box
+                          key={index}
+                          sx={{
+                            flex: '1 1 0px', // Equal width distribution
+                            minWidth: '1px',
+                            maxWidth: '2px',
+                            height: Math.max(3, amplitude * 50) + 'px', // Slightly larger scale
+                            backgroundColor: darkMode ? '#90caf9' : '#1976d2',
+                            borderRadius: '1px 1px 0 0', // Rounded top
+                            opacity: 0.8
+                          }}
+                        />
+                      ))}
+                      
+                      {/* Progress overlay */}
+                      <Box sx={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        height: '100%',
+                        width: duration ? `${(currentTime / duration) * 100}%` : '0%',
+                        backgroundColor: darkMode ? 'rgba(144, 202, 249, 0.3)' : 'rgba(25, 118, 210, 0.3)',
+                        transition: 'width 0.1s ease'
+                      }} />
+                      
+                      {/* Current position indicator */}
+                      <Box sx={{
+                        position: 'absolute',
+                        top: 0,
+                        left: duration ? `${(currentTime / duration) * 100}%` : '0%',
+                        height: '100%',
+                        width: '2px',
+                        backgroundColor: darkMode ? '#fff' : '#333',
+                        transform: 'translateX(-1px)',
+                        transition: 'left 0.1s ease'
+                      }} />
+                    </Box>
+                  ) : isGeneratingWaveform ? (
+                    // Loading state while generating waveform
+                    <Box sx={{ 
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      justifyContent: 'center', 
+                      height: '100%',
+                      gap: 1
+                    }}>
+                      <CircularProgress size={20} />
+                      <Typography variant="caption" sx={{ opacity: 0.7 }}>
+                        Analyzing audio...
+                      </Typography>
+                    </Box>
+                  ) : (
+                    // Fallback to regular progress bar
+                    <Box sx={{ display: 'flex', alignItems: 'center', height: '100%', px: 2 }}>
+                      <LinearProgress 
+                        variant="determinate" 
+                        value={duration ? (currentTime / duration) * 100 : 0}
+                        sx={{ 
+                          width: '100%',
+                          height: 8,
+                          borderRadius: 4,
+                          backgroundColor: darkMode ? '#555' : '#e0e0e0',
+                          '& .MuiLinearProgress-bar': {
+                            borderRadius: 4,
+                            backgroundColor: darkMode ? '#90caf9' : '#1976d2'
+                          }
+                        }}
+                      />
+                    </Box>
+                  )}
                 </Box>
                 
-                <Typography variant="caption" sx={{ minWidth: 80, textAlign: 'right' }}>
-                  {Math.floor(currentTime / 60)}:{(Math.floor(currentTime % 60)).toString().padStart(2, '0')} / {Math.floor(duration / 60)}:{(Math.floor(duration % 60)).toString().padStart(2, '0')}
-                </Typography>
+                {/* Time display under the seek bar */}
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 1 }}>
+                  <Typography variant="caption" sx={{ opacity: 0.7 }}>
+                    {Math.floor(currentTime / 60)}:{(Math.floor(currentTime % 60)).toString().padStart(2, '0')}
+                  </Typography>
+                  <Typography variant="caption" sx={{ opacity: 0.7 }}>
+                    {Math.floor(duration / 60)}:{(Math.floor(duration % 60)).toString().padStart(2, '0')}
+                  </Typography>
+                </Box>
+              </Box>
+              
+              {/* Controls Row */}
+              <Box display="flex" alignItems="center" justifyContent="space-between">
+                <Box display="flex" alignItems="center" gap={1}>
+                  <IconButton onClick={seekBackward} size="small" title="Rewind 10s">
+                    <FastRewindIcon />
+                  </IconButton>
+                  
+                  <IconButton 
+                    onClick={isPlaying ? pauseAudio : resumeAudio} 
+                    color="primary"
+                    size="medium"
+                  >
+                    {isPlaying ? <PauseIcon /> : <PlayArrowIcon />}
+                  </IconButton>
+                  
+                  <IconButton onClick={seekForward} size="small" title="Forward 10s">
+                    <FastForwardIcon />
+                  </IconButton>
+                  
+                  <IconButton onClick={stopAudio} size="small">
+                    <StopIcon />
+                  </IconButton>
+                </Box>
                 
-                <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 100, ml: 1 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 120 }}>
                   <VolumeUpIcon fontSize="small" sx={{ mr: 1, opacity: 0.7 }} />
                   <Slider
                     size="small"
@@ -512,7 +714,7 @@ function FileViewer({ darkMode }) {
                     step={0.05}
                     onChange={(_, newValue) => handleVolumeChange(newValue)}
                     sx={{ 
-                      width: 60,
+                      width: 80,
                       '& .MuiSlider-thumb': {
                         width: 12,
                         height: 12,
@@ -537,12 +739,6 @@ function FileViewer({ darkMode }) {
               </Typography>
             </Box>
           </Paper>
-        )}
-        
-        {!isAdmin && (
-          <Alert severity="info" sx={{ mb: 2 }}>
-            You can only view recordings associated with your email: {userEmail}
-          </Alert>
         )}
 
         <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
@@ -612,9 +808,9 @@ function FileViewer({ darkMode }) {
               fullWidth
               size="small"
               label="Email"
-              value={isAdmin ? emailFilter : userEmail}
-              onChange={(e) => isAdmin && setEmailFilter(e.target.value)}
-              disabled={!isAdmin}
+              value={(isAdmin || userRole === undefined) ? emailFilter : userEmail}
+              onChange={(e) => (isAdmin || userRole === undefined) && setEmailFilter(e.target.value)}
+              disabled={!(isAdmin || userRole === undefined)}
               InputProps={{
                 startAdornment: <InputAdornment position="start">📧</InputAdornment>,
               }}
@@ -780,9 +976,21 @@ function FileViewer({ darkMode }) {
                           color="primary" 
                           onClick={() => playAudio(fileInfo.file)}
                           size="small"
+                          title="Play"
                         >
                           <PlayArrowIcon />
                         </IconButton>
+                        {canDownload && (
+                          <IconButton 
+                            color="secondary" 
+                            onClick={() => downloadFile(fileInfo.file)}
+                            size="small"
+                            title="Download"
+                            sx={{ ml: 1 }}
+                          >
+                            <DownloadIcon />
+                          </IconButton>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))}

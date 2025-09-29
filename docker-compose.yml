@@ -20,7 +20,7 @@ services:
       - "./letsencrypt:/letsencrypt"
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
   recbot:
-    image: ghostreaper69/recbot:v1.2.8
+    image: ghostreaper69/recbot:v1.3.1
     container_name: "recbot"
     labels:
       - traefik.enable=true

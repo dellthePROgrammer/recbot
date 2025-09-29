@@ -86,9 +86,8 @@ function AdminPage({ darkMode }) {
   if (!isAdmin) {
     return (
       <Box sx={{ p: 3, maxWidth: 600, mx: 'auto', mt: 4 }}>
-        <Alert severity="error" sx={{ mb: 2 }}>
-          <Typography variant="h6">Access Denied</Typography>
-          <Typography>You need admin privileges to access this page.</Typography>
+        <Alert severity="info" sx={{ mb: 2 }}>
+          <Typography>This page is not available.</Typography>
         </Alert>
       </Box>
     );

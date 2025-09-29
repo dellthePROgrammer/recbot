@@ -69,9 +69,29 @@ export const requireMemberOrAdmin = (req, res, next) => {
   }
   
   if (!req.user.role || (req.user.role !== 'admin' && req.user.role !== 'member')) {
-    return res.status(403).json({ 
-      error: 'Access denied. Please contact an administrator to assign you a role.' 
-    });
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  
+  next();
+};
+
+// Simplified middleware - any authenticated user can access
+export const requireAuthenticatedUser = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ error: 'User not authenticated' });
+  }
+  
+  next();
+};
+
+// Middleware for manager/admin access (for downloads, etc.)
+export const requireManagerOrAdmin = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ error: 'User not authenticated' });
+  }
+  
+  if (!req.user.role || (req.user.role !== 'admin' && req.user.role !== 'manager')) {
+    return res.status(403).json({ error: 'Forbidden' });
   }
   
   next();
