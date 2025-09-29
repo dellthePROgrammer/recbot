@@ -16,6 +16,7 @@ import {
   HeadObjectCommand
 } from "@aws-sdk/client-s3";
 import { queryFiles, indexFiles, indexFile, getDatabaseStats } from './database.js';
+import { clerkAuth, requireAuth, requireAdmin, requireMemberOrAdmin } from './auth.js';
 
 dayjs.extend(customParseFormat);
 dayjs.extend(isSameOrBefore);
@@ -27,8 +28,16 @@ const WAV_DIR = '/data/wav/recordings'; // For reference, not used with S3
 
 app.use(cors());
 app.use(express.json()); // Parse JSON request bodies
+app.use(clerkAuth); // Add Clerk authentication middleware
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
+
+// Public endpoint to get client configuration
+app.get('/api/config', (req, res) => {
+  res.json({
+    clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY
+  });
+});
 
 async function listWavFilesFromS3(bucket, prefix = "") {
   let files = [];
@@ -51,10 +60,25 @@ async function listWavFilesFromS3(bucket, prefix = "") {
 }
 
 // Stream a .wav file, transcoding and caching in S3 if needed
-app.get('/api/wav-files/*', async (req, res) => {
+// Audio streaming endpoint with role-based access control
+app.get('/api/audio/*', requireAuth, requireMemberOrAdmin, async (req, res) => {
   try {
-    const s3Key = decodeURIComponent(req.params[0]);
+    const filename = decodeURIComponent(req.params[0]);
     const BUCKET_NAME = process.env.AWS_BUCKET;
+    
+    // Role-based file access control
+    if (req.user.role === 'member') {
+      // Members can only access files that contain their email address
+      if (!filename.includes(req.user.email)) {
+        console.log(`🚫 [ACCESS DENIED] Member ${req.user.email} tried to access file: ${filename}`);
+        return res.status(403).json({ error: 'Access denied. You can only access your own recordings.' });
+      }
+      console.log(`🎵 [MEMBER ACCESS] User ${req.user.email} accessing their file: ${filename}`);
+    } else if (req.user.role === 'admin') {
+      console.log(`👑 [ADMIN ACCESS] Admin ${req.user.email} accessing file: ${filename}`);
+    }
+
+    const s3Key = filename.startsWith('recordings/') ? filename : `recordings/${filename}`;
     const cacheKey = 'cache/' + crypto.createHash('md5').update(s3Key).digest('hex') + '.wav';
 
     // 1. Try to stream from S3 cache (with Range support)
@@ -146,8 +170,8 @@ app.get('/api/wav-files/*', async (req, res) => {
 });
 
 // List .wav files from S3, supporting date range queries
-// High-performance files endpoint using database
-app.get('/api/wav-files', async (req, res) => {
+// High-performance files endpoint using database - requires authentication
+app.get('/api/wav-files', requireAuth, requireMemberOrAdmin, async (req, res) => {
   try {
     const {
       dateStart,
@@ -165,12 +189,23 @@ app.get('/api/wav-files', async (req, res) => {
       sortDirection = "desc"
     } = req.query;
 
+    // Role-based email filtering
+    let effectiveEmail = email?.trim() || null;
+    
+    // Members can only see files with their email address
+    if (req.user.role === 'member') {
+      effectiveEmail = req.user.email;
+      console.log(`🔒 [MEMBER ACCESS] User ${req.user.email} accessing their files only`);
+    } else if (req.user.role === 'admin') {
+      console.log(`👑 [ADMIN ACCESS] User ${req.user.email} accessing all files`);
+    }
+
     // Use database query for ultra-fast results
     const result = queryFiles({
       dateStart,
       dateEnd,
       phone: phone?.trim() || null,
-      email: email?.trim() || null,
+      email: effectiveEmail,
       durationMin: durationMin ? parseInt(durationMin) : null,
       timeStart,
       timeEnd,
@@ -198,7 +233,7 @@ app.get('/api/wav-files', async (req, res) => {
 });
 
 // Database sync/indexing endpoint for initial setup and maintenance
-app.post('/api/sync-database', async (req, res) => {
+app.post('/api/sync-database', requireAuth, requireAdmin, async (req, res) => {
   try {
     const BUCKET_NAME = process.env.AWS_BUCKET;
     const { dateRange, forceReindex = false } = req.body || {};
@@ -270,7 +305,7 @@ app.post('/api/sync-database', async (req, res) => {
 });
 
 // Database statistics endpoint
-app.get('/api/database-stats', (req, res) => {
+app.get('/api/database-stats', requireAuth, requireAdmin, (req, res) => {
   try {
     const stats = getDatabaseStats();
     res.json(stats);

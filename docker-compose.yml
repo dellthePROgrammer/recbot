@@ -20,10 +20,8 @@ services:
       - "./letsencrypt:/letsencrypt"
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
   recbot:
-    image: ghostreaper69/recbot:v1.0.1
+    image: ghostreaper69/recbot:v1.2.8
     container_name: "recbot"
-    depends_on:
-      - sqlite
     labels:
       - traefik.enable=true
       - traefik.http.routers.recbot.rule=Host(`your-domain-here`)
@@ -45,6 +43,9 @@ services:
       - BETTERAUTH_CLIENT_ID=your-betterauth-client-id-here
       - BETTERAUTH_CLIENT_SECRET=your-betterauth-client-secret-here
       - BETTERAUTH_REDIRECT_URI=https://your-domain-here/auth/callback
+      - REACT_APP_CLERK_PUBLISHABLE_KEY=pk_test_your_clerk_publishable_key_here
+      - CLERK_PUBLISHABLE_KEY=pk_test_your_clerk_publishable_key_here
+      - CLERK_SECRET_KEY=sk_test_your_clerk_secret_key_here
       #- GOOGLE_CLIENT_ID=your_google_client_id_here
       #- GOOGLE_CLIENT_SECRET=your_google_client_secret_here
       #- GOOGLE_REDIRECT_URI=http://your-domain-here/auth/google/callback
@@ -65,5 +66,4 @@ services:
     # Uncomment to persist logs or mount local folders if needed
     # volumes:
     #   - ./local_wav:/data/wav
-    #   - ./logs:/var/logcbot.db"]   #   - ./local_wav:/data/wav
     #   - ./logs:/var/log
