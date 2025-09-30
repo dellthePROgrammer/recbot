@@ -72,7 +72,7 @@ function Navigation({ darkMode, setDarkMode }) {
     <AppBar position="static" color="default" elevation={1}>
       <Toolbar>
         <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-          RecBot - Audio Manager
+          MTGPros Five9 Recordings
         </Typography>
         
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -128,7 +128,7 @@ function AppContent() {
           <SignedOut>
             <Container maxWidth="sm" sx={{ mt: 8 }}>
               <Typography variant="h4" gutterBottom align="center">
-                RecBot Audio Manager
+                MTGPros Five9 Recordings
               </Typography>
               <Box sx={{ display: 'flex', justifyContent: 'center' }}>
                 <SignIn routing="hash" />
