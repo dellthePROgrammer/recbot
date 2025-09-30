@@ -15,7 +15,7 @@ import {
   PutObjectCommand,
   HeadObjectCommand
 } from "@aws-sdk/client-s3";
-import { queryFiles, indexFiles, indexFile, getDatabaseStats, getAuditLogs, getUserSessions, logAuditEvent, parseFileMetadata, logUserLogout, logUserSession, getDistinctUsers } from './database.js';
+import { queryFiles, indexFiles, indexFile, getDatabaseStats, getAuditLogs, getUserSessions, logAuditEvent, parseFileMetadata, logUserLogout, logUserSession, getDistinctUsers, expireStaleSessions } from './database.js';
 import { clerkAuth, requireAuth, requireAdmin, requireMemberOrAdmin, requireAuthenticatedUser, requireManagerOrAdmin } from './auth.js';
 
 dayjs.extend(customParseFormat);
@@ -69,6 +69,34 @@ app.use(async (req, res, next) => {
 });
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
+
+// --- AUTO SESSION EXPIRATION (4h) ---
+const MAX_SESSION_HOURS = parseInt(process.env.MAX_SESSION_HOURS || '1');
+// Run every 5 minutes to catch stale sessions
+setInterval(() => {
+  try {
+    const expired = expireStaleSessions(MAX_SESSION_HOURS, 200);
+    if (Array.isArray(expired) && expired.length) {
+      console.log(`⏰ [SESSION EXPIRY] Auto-logged out ${expired.length} session(s) > ${MAX_SESSION_HOURS}h`);
+      for (const row of expired) {
+        // Audit each auto logout
+        logAuditEvent(
+          row.user_id,
+          row.user_email,
+          'LOGOUT_AUTO',
+          null,
+          null,
+          row.ip_address || null,
+          row.user_agent || null,
+          row.id,
+          { reason: 'max_session_duration_exceeded', maxHours: MAX_SESSION_HOURS, login_time: row.login_time }
+        );
+      }
+    }
+  } catch (e) {
+    console.error('Auto session expiry error:', e);
+  }
+}, 5 * 60 * 1000);
 
 // Public endpoint to get client configuration
 app.get('/api/config', (req, res) => {

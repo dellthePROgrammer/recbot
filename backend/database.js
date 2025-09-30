@@ -180,6 +180,19 @@ const statements = {
         session_duration_ms = (strftime('%s', 'now') - strftime('%s', login_time)) * 1000
     WHERE user_id = ? AND logout_time IS NULL
   `),
+  forceExpireSessionById: db.prepare(`
+    UPDATE user_sessions
+    SET logout_time = CURRENT_TIMESTAMP,
+        session_duration_ms = (strftime('%s','now') - strftime('%s', login_time)) * 1000
+    WHERE id = ? AND logout_time IS NULL
+  `),
+  getExpiredOpenSessions: db.prepare(`
+    SELECT id, user_id, user_email, login_time, ip_address, user_agent
+    FROM user_sessions
+    WHERE logout_time IS NULL
+      AND (strftime('%s','now') - strftime('%s', login_time)) > (? * 3600)
+    LIMIT ?
+  `),
   
   createAuditLog: db.prepare(`
     INSERT INTO audit_logs (user_id, user_email, action_type, file_path, file_phone, file_email, 
@@ -435,6 +448,21 @@ export function logUserLogout(userId) {
     console.log(`📋 [AUDIT] User session ended for ${userId}`);
   } catch (error) {
     console.error('Error updating user session:', error);
+  }
+}
+
+export function expireStaleSessions(maxHours = 4, batchLimit = 100) {
+  try {
+    const rows = statements.getExpiredOpenSessions.all(maxHours, batchLimit);
+    if (!rows.length) return 0;
+    const ids = rows.map(r => r.id);
+    for (const row of rows) {
+      statements.forceExpireSessionById.run(row.id);
+    }
+    return rows;
+  } catch (e) {
+    console.error('Error expiring sessions:', e);
+    return 0;
   }
 }
 

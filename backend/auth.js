@@ -1,5 +1,5 @@
 import { clerkMiddleware, getAuth, clerkClient } from '@clerk/express';
-import { logUserSession, logAuditEvent, getLastLogin } from './database.js';
+import { logUserSession, logAuditEvent, getLastLogin, getUserSessions } from './database.js';
 
 // Initialize Clerk with required environment variables
 if (!process.env.CLERK_SECRET_KEY) {
@@ -64,17 +64,49 @@ export const requireAuth = async (req, res, next) => {
     
     console.log(`🔐 [AUTH] Client IP: ${ipAddress}, User Agent: ${userAgent.substring(0, 50)}...`);
     
-    // Check if this is a new session (check last login)
-    const lastLogin = getLastLogin(user.id);
-    const now = new Date();
-    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-    
-    // If no last login or last login was more than 1 hour ago, log new session
-    if (!lastLogin || new Date(lastLogin) < oneHourAgo) {
+    // Attempt to parse custom __session cookie claims (unverified decode, rely on clerk middleware for auth)
+    let sessionClaims = null;
+    try {
+      const cookieHeader = req.headers['cookie'] || req.headers['Cookie'];
+      if (cookieHeader) {
+        const match = cookieHeader.split(';').map(s => s.trim()).find(c => c.startsWith('__session='));
+        if (match) {
+          const token = match.substring('__session='.length + match.indexOf('__session='));
+          const raw = match.split('=')[1];
+          const parts = raw.split('.');
+            if (parts.length >= 2) {
+              const payload = JSON.parse(Buffer.from(parts[1].replace(/-/g,'+').replace(/_/g,'/'), 'base64').toString('utf8'));
+              sessionClaims = payload;
+            }
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to decode __session claims:', e.message);
+    }
+
+    // Determine if there is an existing open session (logout_time NULL); if not, create one & log LOGIN
+    let openSessionExists = false;
+    try {
+      const recent = getUserSessions(user.id, null, null, 5, 0);
+      openSessionExists = recent.some(s => !s.logout_time);
+    } catch (e) {
+      console.warn('Could not determine open session state, proceeding to create new session:', e.message);
+    }
+    if (!openSessionExists) {
+      const now = new Date();
+      const lastLogin = getLastLogin(user.id);
       logUserSession(user.id, userEmail, ipAddress, userAgent);
       logAuditEvent(user.id, userEmail, 'LOGIN', null, null, ipAddress, userAgent, null, {
-        lastLogin: lastLogin,
-        loginTime: now.toISOString()
+        lastLogin,
+        loginTime: now.toISOString(),
+        reason: 'new_session_no_open_session',
+        claims: sessionClaims ? {
+          email: sessionClaims.email,
+            userId: sessionClaims.userId,
+            firstName: sessionClaims.firstName,
+            lastName: sessionClaims.lastName,
+            lastSignedin: sessionClaims.lastSignedin
+        } : null
       });
     }
 
@@ -86,7 +118,8 @@ export const requireAuth = async (req, res, next) => {
       firstName: user.firstName,
       lastName: user.lastName,
       ipAddress: ipAddress,  // Real client IP (from realClientIP)
-      userAgent: userAgent
+      userAgent: userAgent,
+      sessionClaims
     };
     
     next();
