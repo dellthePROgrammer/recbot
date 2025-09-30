@@ -32,8 +32,9 @@ function DomainValidator({ children }) {
   }
   
   const userEmail = user?.emailAddresses?.[0]?.emailAddress;
+  const isEmailVerified = user?.emailAddresses?.[0]?.verification?.status === 'verified';
   
-  // Check if user email is from allowed domain
+  // Check if user email is from allowed domain AND verified
   if (!userEmail || !userEmail.endsWith('@mtgpros.com')) {
     return (
       <Container maxWidth="md" sx={{ mt: 8 }}>
@@ -52,6 +53,33 @@ function DomainValidator({ children }) {
           <Box sx={{ mt: 3 }}>
             <Typography variant="body2" color="text.secondary" paragraph>
               If you believe this is an error, please contact your administrator.
+            </Typography>
+            <UserButton afterSignOutUrl="/" />
+          </Box>
+        </Paper>
+      </Container>
+    );
+  }
+  
+  // Check if email is verified
+  if (!isEmailVerified) {
+    return (
+      <Container maxWidth="md" sx={{ mt: 8 }}>
+        <Paper sx={{ p: 4, textAlign: 'center' }}>
+          <Alert severity="warning" sx={{ mb: 3 }}>
+            <Typography variant="h5" gutterBottom>
+              Email Verification Required
+            </Typography>
+            <Typography variant="body1" paragraph>
+              Please verify your email address to access MTGPros Five9 Recordings.
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Your email: <strong>{userEmail}</strong> needs to be verified.
+            </Typography>
+          </Alert>
+          <Box sx={{ mt: 3 }}>
+            <Typography variant="body2" color="text.secondary" paragraph>
+              Check your email for a verification link, or contact your administrator if you need assistance.
             </Typography>
             <UserButton afterSignOutUrl="/" />
           </Box>

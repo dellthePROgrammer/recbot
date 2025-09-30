@@ -33,7 +33,9 @@ export const requireAuth = async (req, res, next) => {
       return res.status(401).json({ error: 'User not found' });
     }
 
-    const userEmail = user.emailAddresses?.[0]?.emailAddress;
+    const primaryEmailAddress = user.emailAddresses?.find(email => email.id === user.primaryEmailAddressId);
+    const userEmail = primaryEmailAddress?.emailAddress;
+    const isEmailVerified = primaryEmailAddress?.verification?.status === 'verified';
     
     // DOMAIN RESTRICTION: Only allow @mtgpros.com domain
     if (!userEmail || !userEmail.endsWith('@mtgpros.com')) {
@@ -44,7 +46,16 @@ export const requireAuth = async (req, res, next) => {
       });
     }
     
-    console.log(`✅ [DOMAIN ACCESS] User ${userEmail} granted access (@mtgpros.com domain)`);
+    // EMAIL VERIFICATION: Require verified email
+    if (!isEmailVerified) {
+      console.log(`🚫 [EMAIL NOT VERIFIED] User ${userEmail} attempted access - email not verified`);
+      return res.status(403).json({ 
+        error: 'Email verification required', 
+        message: 'Please verify your email address to access this application' 
+      });
+    }
+    
+    console.log(`✅ [DOMAIN ACCESS] User ${userEmail} granted access (@mtgpros.com domain, verified)`);
 
     // Add user info to request for easier access
     req.user = {
