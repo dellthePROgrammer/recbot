@@ -211,6 +211,19 @@ const statements = {
     WHERE user_id = ? 
     ORDER BY login_time DESC 
     LIMIT 1
+  `),
+
+  // Distinct users from audit_logs and user_sessions for autocomplete
+  getDistinctUsers: db.prepare(`
+    SELECT user_id, user_email FROM (
+      SELECT user_id, user_email FROM audit_logs
+      UNION ALL
+      SELECT user_id, user_email FROM user_sessions
+    )
+    WHERE (? IS NULL OR user_email LIKE '%' || ? || '%' OR user_id LIKE '%' || ? || '%')
+    GROUP BY user_id, user_email
+    ORDER BY user_email
+    LIMIT ?
   `)
 };
 
@@ -486,6 +499,16 @@ export function getLastLogin(userId) {
   } catch (error) {
     console.error('Error getting last login:', error);
     return null;
+  }
+}
+
+export function getDistinctUsers(search = null, limit = 20) {
+  try {
+    const term = search && search.trim() !== '' ? search.trim() : null;
+    return statements.getDistinctUsers.all(term, term, term, limit);
+  } catch (error) {
+    console.error('Error getting distinct users:', error);
+    return [];
   }
 }
 

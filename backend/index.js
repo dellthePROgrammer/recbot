@@ -15,7 +15,7 @@ import {
   PutObjectCommand,
   HeadObjectCommand
 } from "@aws-sdk/client-s3";
-import { queryFiles, indexFiles, indexFile, getDatabaseStats, getAuditLogs, getUserSessions, logAuditEvent, parseFileMetadata, logUserLogout, logUserSession } from './database.js';
+import { queryFiles, indexFiles, indexFile, getDatabaseStats, getAuditLogs, getUserSessions, logAuditEvent, parseFileMetadata, logUserLogout, logUserSession, getDistinctUsers } from './database.js';
 import { clerkAuth, requireAuth, requireAdmin, requireMemberOrAdmin, requireAuthenticatedUser, requireManagerOrAdmin } from './auth.js';
 
 dayjs.extend(customParseFormat);
@@ -179,47 +179,13 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
-// Audio endpoint with query parameter auth support for direct streaming
-app.get('/api/audio/*', async (req, res) => {
+// Authenticated audio streaming endpoint (now uses requireAuth so req.user is available)
+app.get('/api/audio/*', requireAuth, ensureSession, async (req, res) => {
   try {
     const filename = decodeURIComponent(req.params[0]);
     const BUCKET_NAME = process.env.AWS_BUCKET;
     
-    // Handle authentication from either header or query parameter
-    let token = null;
-    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
-      token = req.headers.authorization.substring(7);
-    } else if (req.query.auth) {
-      token = req.query.auth;
-    }
-    
-    if (!token) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-    
-    // Verify the token and check domain restriction
-    try {
-      // For streaming endpoints, we need to verify the JWT token properly
-      // and extract user information to check domain
-      
-      // Import jwt verification (you might need to adjust based on Clerk's token format)
-      // For now, let's assume the token is valid if it exists and matches expected format
-      // In production, properly decode and verify the JWT
-      
-      console.log(`🎵 [STREAMING AUTH] Token provided for: ${filename}`);
-      
-      // TODO: Implement proper JWT verification and extract email
-      // For now, we'll rely on the frontend domain check, but this should be enhanced
-      // const decoded = jwt.verify(token, process.env.CLERK_SECRET_KEY);
-      // const userEmail = decoded.email;
-      // if (!userEmail || !userEmail.endsWith('@mtgpros.com')) {
-      //   return res.status(403).json({ error: 'Access denied - domain restriction' });
-      // }
-      
-    } catch (authError) {
-      console.error('Authentication failed:', authError);
-      return res.status(401).json({ error: 'Invalid authentication token' });
-    }
+    console.log(`🎵 [STREAMING AUTH] User ${req.user.email} (${req.user.role || 'no-role'}) streaming: ${filename}`);
 
     const s3Key = filename.startsWith('recordings/') ? filename : `recordings/${filename}`;
     const cacheKey = 'cache/wav/' + crypto.createHash('md5').update(s3Key).digest('hex') + '.wav';
@@ -233,8 +199,8 @@ app.get('/api/audio/*', async (req, res) => {
       await s3.send(new HeadObjectCommand({ Bucket: BUCKET_NAME, Key: cacheKey }));
       
       console.log(`⚡ [CACHE HIT] Serving from cache: ${cacheKey}`);
-      
-      // Serve from cache with range support for seeking
+      // Mark cacheHit for later single audit emission
+      req._playAudit = { cacheHit: true };
       const range = req.headers.range;
       const params = { Bucket: BUCKET_NAME, Key: cacheKey };
       if (range) {
@@ -258,6 +224,26 @@ app.get('/api/audio/*', async (req, res) => {
       
     } catch {
       console.log(`📦 [CACHE MISS] Need to convert and cache: ${s3Key}`);
+      req._playAudit = { cacheHit: false };
+    }
+
+    // Emit a single consolidated PLAY_FILE audit event now that we know cache hit/miss
+    try {
+      const meta = parseFileMetadata(filename) || {};
+      const cacheInfo = req._playAudit ? req._playAudit.cacheHit : null;
+      logAuditEvent(
+        req.user.id,
+        req.user.email,
+        'PLAY_FILE',
+        filename,
+        meta,
+        req.user.ipAddress,
+        req.user.userAgent,
+        req.currentSessionId || null,
+        { cacheHit: cacheInfo, userRole: req.user.role }
+      );
+    } catch (e) {
+      console.error('⚠️ [AUDIT PLAY] Consolidated log failed:', e);
     }
 
     // Get the original file from S3
@@ -858,6 +844,18 @@ app.get('/api/user-sessions', requireAuth, ensureSession, requireAdmin, (req, re
     });
   } catch (err) {
     console.error('Error getting user sessions:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Autocomplete distinct users (admin only)
+app.get('/api/audit-users', requireAuth, ensureSession, requireAdmin, (req, res) => {
+  try {
+    const { q, limit = 20 } = req.query;
+    const users = getDistinctUsers(q || null, Math.min(parseInt(limit) || 20, 100));
+    res.json({ users });
+  } catch (err) {
+    console.error('Error getting distinct users:', err);
     res.status(500).json({ error: err.message });
   }
 });

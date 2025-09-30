@@ -23,7 +23,13 @@ import {
   Pagination,
   Tabs,
   Tab,
-  Grid
+  Grid,
+  List,
+  ListItem,
+  ListItemButton,
+  ListItemText,
+  Popper,
+  Paper as MuiPaper
 } from '@mui/material';
 import {
   Storage as DatabaseIcon,
@@ -51,6 +57,32 @@ function AdminPage({ darkMode }) {
     endDate: '',
     userId: ''
   });
+  const [userSuggestions, setUserSuggestions] = useState([]);
+  const [userQuery, setUserQuery] = useState('');
+  const [showUserPopper, setShowUserPopper] = useState(false);
+  const userInputRef = React.useRef(null);
+  const userDebounceRef = React.useRef(null);
+
+  const fetchUserSuggestions = async (q) => {
+    if (!q || q.trim() === '') { setUserSuggestions([]); return; }
+    try {
+      const resp = await fetch(`/api/audit-users?q=${encodeURIComponent(q)}&limit=12`, {
+        headers: { 'Authorization': `Bearer ${await getToken()}` }
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        setUserSuggestions(data.users || []);
+      }
+    } catch (e) {
+      console.error('User suggestions error:', e);
+    }
+  };
+
+  useEffect(() => {
+    if (userDebounceRef.current) clearTimeout(userDebounceRef.current);
+    if (!showUserPopper) return; // only fetch while popper active
+    userDebounceRef.current = setTimeout(() => fetchUserSuggestions(userQuery), 250);
+  }, [userQuery, showUserPopper]);
   const [auditPage, setAuditPage] = useState(1);
   const [sessionsPage, setSessionsPage] = useState(1);
 
@@ -286,6 +318,37 @@ function AdminPage({ darkMode }) {
                 onChange={(e) => setAuditFilters({...auditFilters, endDate: e.target.value})}
                 InputLabelProps={{ shrink: true }}
               />
+            </Grid>
+            <Grid item xs={12} sm={6} md={3}>
+              <Box ref={userInputRef} sx={{ position: 'relative' }}>
+                <TextField
+                  fullWidth
+                  size="small"
+                  label="User Email / ID"
+                  placeholder="Search user..."
+                  value={userQuery || auditFilters.userId}
+                  onFocus={() => { setShowUserPopper(true); setUserQuery(auditFilters.userId); }}
+                  onChange={(e) => { setUserQuery(e.target.value); setAuditFilters({ ...auditFilters, userId: '' }); }}
+                  InputLabelProps={{ shrink: true }}
+                />
+                <Popper open={showUserPopper && userSuggestions.length > 0} anchorEl={userInputRef.current} placement="bottom-start" style={{ zIndex: 1300 }}>
+                  <MuiPaper elevation={3} sx={{ maxHeight: 260, overflowY: 'auto', minWidth: userInputRef.current?.offsetWidth || 200 }}>
+                    <List dense disablePadding>
+                      {userSuggestions.map(s => (
+                        <ListItem key={s.user_id} disablePadding>
+                          <ListItemButton onClick={() => {
+                            setAuditFilters({ ...auditFilters, userId: s.user_id });
+                            setUserQuery(s.user_email);
+                            setShowUserPopper(false);
+                          }}>
+                            <ListItemText primary={s.user_email} secondary={s.user_id} />
+                          </ListItemButton>
+                        </ListItem>
+                      ))}
+                    </List>
+                  </MuiPaper>
+                </Popper>
+              </Box>
             </Grid>
             <Grid item xs={12} sm={6} md={3}>
               <Button
