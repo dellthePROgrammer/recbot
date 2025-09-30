@@ -24,6 +24,7 @@ services:
     container_name: "recbot"
     labels:
       - traefik.enable=true
+      # Removed custom header rewrites; Traefik already sets X-Forwarded-For and preserves CF-Connecting-IP from Cloudflare.
       - traefik.http.routers.recbot.rule=Host(`your-domain-here`)
       - traefik.http.routers.recbot.entrypoints=websecure
       - traefik.http.routers.recbot.tls.certresolver=letsencrypt

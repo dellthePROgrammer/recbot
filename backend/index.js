@@ -15,7 +15,7 @@ import {
   PutObjectCommand,
   HeadObjectCommand
 } from "@aws-sdk/client-s3";
-import { queryFiles, indexFiles, indexFile, getDatabaseStats, getAuditLogs, getUserSessions } from './database.js';
+import { queryFiles, indexFiles, indexFile, getDatabaseStats, getAuditLogs, getUserSessions, logAuditEvent, parseFileMetadata, logUserLogout, logUserSession } from './database.js';
 import { clerkAuth, requireAuth, requireAdmin, requireMemberOrAdmin, requireAuthenticatedUser, requireManagerOrAdmin } from './auth.js';
 
 dayjs.extend(customParseFormat);
@@ -28,7 +28,45 @@ const WAV_DIR = '/data/wav/recordings'; // For reference, not used with S3
 
 app.use(cors());
 app.use(express.json()); // Parse JSON request bodies
+
+// Configure Express to trust proxies for proper IP extraction
+app.set('trust proxy', true);
+
+// Middleware to extract real client IP from proxy headers
+app.use((req, res, next) => {
+  // Capture raw headers for diagnostics (not stored, just logged when needed)
+  const h = req.headers;
+
+  // Canonical header names we care about
+  const cf = h['cf-connecting-ip'];
+  const xReal = h['x-real-ip'];
+  const xForwardedFor = h['x-forwarded-for'];
+  const xClient = h['x-client-ip'];
+
+  // Build candidate list in priority order: Cloudflare > X-Real-IP (Traefik) > first X-Forwarded-For > x-client-ip > req.ip
+  let candidate = cf || xReal || (xForwardedFor ? xForwardedFor.split(',')[0].trim() : null) || xClient || req.ip || 'unknown';
+
+  // Strip IPv6 previx if Node expressed it
+  if (candidate && candidate.startsWith('::ffff:')) candidate = candidate.slice(7);
+
+  req.realClientIP = candidate;
+  req.forwardedChain = xForwardedFor || null; // keep chain for potential later auditing
+
+  // Only verbose-log once per request path for now
+  console.log('🌐 [IP] resolved=%s cf=%s x-real=%s x-forwarded-for=%s node-ip=%s', candidate, cf || '-', xReal || '-', xForwardedFor || '-', req.ip);
+  next();
+});
+
 app.use(clerkAuth); // Add Clerk authentication middleware
+
+// Fallback session creator: ensures every authenticated user has an active session row
+app.use(async (req, res, next) => {
+  // Only proceed for routes using requireAuth (those will set req.user) – if not set yet just continue
+  if (!req.path.startsWith('/api/') || req.path === '/api/config') return next();
+  // If user object not yet populated, continue; requireAuth will populate in route chain
+  // We'll run another tiny middleware after requireAuth inside protected routes if needed.
+  return next();
+});
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 
@@ -37,6 +75,52 @@ app.get('/api/config', (req, res) => {
   res.json({
     clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY
   });
+});
+
+// Logout endpoint to track user logout events
+// Middleware to ensure session row exists after requireAuth sets req.user
+function ensureSession(req, res, next) {
+  try {
+    if (!req.user) return next();
+    // Quick check: if last login was within 10 seconds but no session row created (edge), we can create
+    // Simpler: attempt to create a session only if no open session exists (logout_time is NULL)
+    // We'll query DB minimally.
+    const openSession = getUserSessions(req.user.id, null, null, 1, 0).find(s => !s.logout_time);
+    if (!openSession) {
+      const sessionId = logUserSession(req.user.id, req.user.email, req.user.ipAddress, req.user.userAgent);
+      req.currentSessionId = sessionId;
+    } else {
+      req.currentSessionId = openSession.id;
+    }
+  } catch (e) {
+    console.error('ensureSession error:', e);
+  }
+  next();
+}
+
+app.post('/api/logout', requireAuth, ensureSession, (req, res) => {
+  try {
+    // Log the logout event
+    logAuditEvent(
+      req.user.id, 
+      req.user.email, 
+      'LOGOUT', 
+      null, 
+      null, 
+      req.user.ipAddress, 
+      req.user.userAgent, 
+      null, 
+      { userRole: req.user.role }
+    );
+    
+    // Update the user session to mark logout time
+    logUserLogout(req.user.id);
+    
+    res.json({ success: true, message: 'Logout recorded' });
+  } catch (error) {
+    console.error('Error logging logout:', error);
+    res.status(500).json({ error: 'Failed to record logout' });
+  }
 });
 
 async function listWavFilesFromS3(bucket, prefix = "") {
@@ -493,12 +577,33 @@ app.get('/api/waveform/*', async (req, res) => {
 });
 
 // Download endpoint with role-based access control
-app.get('/api/download/*', requireAuth, requireManagerOrAdmin, async (req, res) => {
+app.get('/api/download/*', requireAuth, ensureSession, requireManagerOrAdmin, async (req, res) => {
   try {
     const filename = decodeURIComponent(req.params[0]);
     const BUCKET_NAME = process.env.AWS_BUCKET;
     
     console.log(`📥 [DOWNLOAD] User ${req.user.email} (${req.user.role}) downloading: ${filename}`);
+    try {
+      // Attempt to parse metadata for richer audit details
+      const meta = parseFileMetadata(filename) || {};
+      logAuditEvent(
+        req.user.id,
+        req.user.email,
+        'DOWNLOAD_FILE',
+        filename,
+        meta.phone || null,
+        req.user.ipAddress,
+        req.user.userAgent,
+        meta.duration || null,
+        {
+          userRole: req.user.role,
+          date: meta.date || null,
+          time: meta.time || null
+        }
+      );
+    } catch (auditErr) {
+      console.error('⚠️ [AUDIT] Failed to log download event:', auditErr);
+    }
 
     const s3Key = filename.startsWith('recordings/') ? filename : `recordings/${filename}`;
     
@@ -523,7 +628,7 @@ app.get('/api/download/*', requireAuth, requireManagerOrAdmin, async (req, res) 
 });
 
 // High-performance files endpoint using database - requires authentication
-app.get('/api/wav-files', requireAuth, requireAuthenticatedUser, async (req, res) => {
+app.get('/api/wav-files', requireAuth, ensureSession, requireAuthenticatedUser, async (req, res) => {
   try {
     const {
       dateStart,
@@ -545,7 +650,32 @@ app.get('/api/wav-files', requireAuth, requireAuthenticatedUser, async (req, res
     let effectiveEmail = email?.trim() || null;
     
     // All authenticated users can view all files
-    console.log(`� [USER ACCESS] User ${req.user.email} accessing all files (view-only)`);
+    console.log(`📄 [VIEW_FILES] User ${req.user.email} viewing file list`);
+    try {
+      logAuditEvent(
+        req.user.id,
+        req.user.email,
+        'VIEW_FILES',
+        null,
+        phone?.trim() || null,
+        req.user.ipAddress,
+        req.user.userAgent,
+        null,
+        {
+          userRole: req.user.role,
+          dateStart: dateStart || null,
+          dateEnd: dateEnd || null,
+          durationMin: durationMin ? parseInt(durationMin) : null,
+          timeStart: timeStart || null,
+            timeEnd: timeEnd || null,
+          sort: `${sortColumn}:${sortDirection}`,
+          offset: parseInt(offset) || 0,
+          limit: parseInt(limit) || 25
+        }
+      );
+    } catch (auditErr) {
+      console.error('⚠️ [AUDIT] Failed to log view files event:', auditErr);
+    }
     
     // Note: Download protection is handled at the audio streaming level
 
@@ -582,7 +712,7 @@ app.get('/api/wav-files', requireAuth, requireAuthenticatedUser, async (req, res
 });
 
 // Database sync/indexing endpoint for initial setup and maintenance
-app.post('/api/sync-database', requireAuth, requireAdmin, async (req, res) => {
+app.post('/api/sync-database', requireAuth, ensureSession, requireAdmin, async (req, res) => {
   try {
     const BUCKET_NAME = process.env.AWS_BUCKET;
     const { dateRange, forceReindex = false } = req.body || {};
@@ -654,7 +784,7 @@ app.post('/api/sync-database', requireAuth, requireAdmin, async (req, res) => {
 });
 
 // Database statistics endpoint
-app.get('/api/database-stats', requireAuth, requireAdmin, (req, res) => {
+app.get('/api/database-stats', requireAuth, ensureSession, requireAdmin, (req, res) => {
   try {
     const stats = getDatabaseStats();
     res.json(stats);
@@ -665,7 +795,7 @@ app.get('/api/database-stats', requireAuth, requireAdmin, (req, res) => {
 });
 
 // Audit logs endpoint - admin only
-app.get('/api/audit-logs', requireAuth, requireAdmin, (req, res) => {
+app.get('/api/audit-logs', requireAuth, ensureSession, requireAdmin, (req, res) => {
   try {
     const {
       userId,
@@ -700,7 +830,7 @@ app.get('/api/audit-logs', requireAuth, requireAdmin, (req, res) => {
 });
 
 // User sessions endpoint - admin only
-app.get('/api/user-sessions', requireAuth, requireAdmin, (req, res) => {
+app.get('/api/user-sessions', requireAuth, ensureSession, requireAdmin, (req, res) => {
   try {
     const {
       userId,

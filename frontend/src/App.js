@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { ClerkProvider, SignIn, SignUp, SignedIn, SignedOut, UserButton, useUser } from '@clerk/clerk-react';
+import { ClerkProvider, SignIn, SignUp, SignedIn, SignedOut, UserButton, useUser, useClerk } from '@clerk/clerk-react';
 import { BrowserRouter as Router, Routes, Route, Navigate, Link } from 'react-router-dom';
 import {
   AppBar,
@@ -94,7 +94,18 @@ function DomainValidator({ children }) {
 
 function Navigation({ darkMode, setDarkMode }) {
   const { user } = useUser();
+  const { signOut } = useClerk();
   const isAdmin = user?.publicMetadata?.role === 'admin';
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    } catch (e) {
+      console.error('Failed to record logout', e);
+    } finally {
+      await signOut({ redirectUrl: '/' });
+    }
+  };
 
   return (
     <AppBar position="static" color="default" elevation={1}>
@@ -119,7 +130,7 @@ function Navigation({ darkMode, setDarkMode }) {
             label="Dark Mode"
           />
           
-          <UserButton afterSignOutUrl="/" />
+          <Button variant="outlined" size="small" color="error" onClick={handleLogout}>Logout</Button>
         </Box>
       </Toolbar>
     </AppBar>

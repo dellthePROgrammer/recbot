@@ -59,8 +59,10 @@ export const requireAuth = async (req, res, next) => {
     console.log(`✅ [DOMAIN ACCESS] User ${userEmail} granted access (@mtgpros.com domain, verified)`);
 
     // Get client IP and user agent for audit logging
-    const ipAddress = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
+    const ipAddress = req.realClientIP || req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
     const userAgent = req.headers['user-agent'] || 'unknown';
+    
+    console.log(`🔐 [AUTH] Client IP: ${ipAddress}, User Agent: ${userAgent.substring(0, 50)}...`);
     
     // Check if this is a new session (check last login)
     const lastLogin = getLastLogin(user.id);
@@ -83,7 +85,7 @@ export const requireAuth = async (req, res, next) => {
       role: user.publicMetadata?.role || null,
       firstName: user.firstName,
       lastName: user.lastName,
-      ipAddress: ipAddress,
+      ipAddress: ipAddress,  // Real client IP (from realClientIP)
       userAgent: userAgent
     };
     
