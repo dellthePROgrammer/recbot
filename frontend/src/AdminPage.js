@@ -7,12 +7,30 @@ import {
   Button,
   Alert,
   LinearProgress,
-  Divider
+  Divider,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Chip,
+  TextField,
+  Select,
+  MenuItem,
+  FormControl,
+  InputLabel,
+  Pagination,
+  Tabs,
+  Tab,
+  Grid
 } from '@mui/material';
 import {
   Storage as DatabaseIcon,
   Sync as SyncIcon,
-  Warning as WarningIcon
+  Warning as WarningIcon,
+  Security as AuditIcon,
+  People as UsersIcon
 } from '@mui/icons-material';
 
 function AdminPage({ darkMode }) {
@@ -21,6 +39,20 @@ function AdminPage({ darkMode }) {
   const [dbStats, setDbStats] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState("");
+  const [currentTab, setCurrentTab] = useState(0);
+  
+  // Audit state
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [userSessions, setUserSessions] = useState([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditFilters, setAuditFilters] = useState({
+    actionType: '',
+    startDate: '',
+    endDate: '',
+    userId: ''
+  });
+  const [auditPage, setAuditPage] = useState(1);
+  const [sessionsPage, setSessionsPage] = useState(1);
 
   // Check if user has admin role
   const isAdmin = user?.publicMetadata?.role === 'admin';
@@ -46,6 +78,58 @@ function AdminPage({ darkMode }) {
       setDbStats(stats);
     } catch (error) {
       console.error('Error fetching database stats:', error);
+    }
+  };
+
+  const fetchAuditLogs = async (page = 1) => {
+    if (!isAdmin) return;
+    
+    setAuditLoading(true);
+    try {
+      const params = new URLSearchParams({
+        limit: '50',
+        offset: ((page - 1) * 50).toString(),
+        ...(auditFilters.actionType && { actionType: auditFilters.actionType }),
+        ...(auditFilters.startDate && { startDate: auditFilters.startDate }),
+        ...(auditFilters.endDate && { endDate: auditFilters.endDate }),
+        ...(auditFilters.userId && { userId: auditFilters.userId }),
+      });
+
+      const response = await fetch(`/api/audit-logs?${params}`, {
+        headers: {
+          'Authorization': `Bearer ${await getToken()}`
+        }
+      });
+      const data = await response.json();
+      setAuditLogs(data.logs || []);
+    } catch (error) {
+      console.error('Error fetching audit logs:', error);
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+
+  const fetchUserSessions = async (page = 1) => {
+    if (!isAdmin) return;
+    
+    try {
+      const params = new URLSearchParams({
+        limit: '50',
+        offset: ((page - 1) * 50).toString(),
+        ...(auditFilters.startDate && { startDate: auditFilters.startDate }),
+        ...(auditFilters.endDate && { endDate: auditFilters.endDate }),
+        ...(auditFilters.userId && { userId: auditFilters.userId }),
+      });
+
+      const response = await fetch(`/api/user-sessions?${params}`, {
+        headers: {
+          'Authorization': `Bearer ${await getToken()}`
+        }
+      });
+      const data = await response.json();
+      setUserSessions(data.sessions || []);
+    } catch (error) {
+      console.error('Error fetching user sessions:', error);
     }
   };
 
@@ -102,53 +186,216 @@ function AdminPage({ darkMode }) {
       
       <Divider sx={{ mb: 3 }} />
 
-      <Paper elevation={1} sx={{ p: 3, mb: 3, backgroundColor: darkMode ? 'grey.900' : 'grey.50' }}>
-        <Typography variant="h6" gutterBottom>
-          Database Management - Scale: {dbStats ? `${dbStats.totalFiles.toLocaleString()} files` : 'Loading...'}
-        </Typography>
-        
-        {dbStats && (
-          <Box sx={{ mb: 2 }}>
-            <Typography variant="body2" color="text.secondary">
-              Database Size: {((dbStats.databaseSize || 0) / 1024 / 1024).toFixed(1)} MB
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Database Path: {dbStats.databasePath}
-            </Typography>
-          </Box>
-        )}
+      <Tabs value={currentTab} onChange={(e, newValue) => setCurrentTab(newValue)} sx={{ mb: 3 }}>
+        <Tab label="Database Management" icon={<DatabaseIcon />} />
+        <Tab label="Audit Logs" icon={<AuditIcon />} />
+        <Tab label="User Sessions" icon={<UsersIcon />} />
+      </Tabs>
 
-        <Box display="flex" gap={2} alignItems="center" flexWrap="wrap">
-          <Button
-            variant="outlined"
-            onClick={() => syncDatabase()}
-            disabled={syncing}
-            color="warning"
-            startIcon={<WarningIcon />}
-            title="WARNING: Will sync ALL files - may take time with 300k+ files"
-          >
-            {syncing ? 'Syncing...' : 'Full Sync (⚠️ All Files)'}
-          </Button>
+      {currentTab === 0 && (
+        <Paper elevation={1} sx={{ p: 3, mb: 3, backgroundColor: darkMode ? 'grey.900' : 'grey.50' }}>
+          <Typography variant="h6" gutterBottom>
+            Database Management - Scale: {dbStats ? `${dbStats.totalFiles.toLocaleString()} files` : 'Loading...'}
+          </Typography>
           
-          <Button
-            variant="text"
-            onClick={fetchDatabaseStats}
-            disabled={syncing}
-            startIcon={<SyncIcon />}
-          >
-            Refresh Stats
-          </Button>
-        </Box>
+          {dbStats && (
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="body2" color="text.secondary">
+                Database Size: {((dbStats.databaseSize || 0) / 1024 / 1024).toFixed(1)} MB
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Database Path: {dbStats.databasePath}
+              </Typography>
+            </Box>
+          )}
 
-        {syncProgress && (
-          <Box sx={{ mt: 2 }}>
-            <Typography variant="body2" color="text.secondary">
-              {syncProgress}
-            </Typography>
-            {syncing && <LinearProgress sx={{ mt: 1 }} />}
+          <Box display="flex" gap={2} alignItems="center" flexWrap="wrap">
+            <Button
+              variant="outlined"
+              onClick={() => syncDatabase()}
+              disabled={syncing}
+              color="warning"
+              startIcon={<WarningIcon />}
+              title="WARNING: Will sync ALL files - may take time with 300k+ files"
+            >
+              {syncing ? 'Syncing...' : 'Full Sync (⚠️ All Files)'}
+            </Button>
+            
+            <Button
+              variant="text"
+              onClick={fetchDatabaseStats}
+              disabled={syncing}
+              startIcon={<SyncIcon />}
+            >
+              Refresh Stats
+            </Button>
           </Box>
-        )}
-      </Paper>
+
+          {syncProgress && (
+            <Box sx={{ mt: 2 }}>
+              <Typography variant="body2" color="text.secondary">
+                {syncProgress}
+              </Typography>
+              {syncing && <LinearProgress sx={{ mt: 1 }} />}
+            </Box>
+          )}
+        </Paper>
+      )}
+
+      {currentTab === 1 && (
+        <Paper elevation={1} sx={{ p: 3, mb: 3, backgroundColor: darkMode ? 'grey.900' : 'grey.50' }}>
+          <Typography variant="h6" gutterBottom>
+            Audit Logs
+          </Typography>
+          
+          <Grid container spacing={2} sx={{ mb: 3 }}>
+            <Grid item xs={12} sm={6} md={3}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Action Type</InputLabel>
+                <Select
+                  value={auditFilters.actionType}
+                  onChange={(e) => setAuditFilters({...auditFilters, actionType: e.target.value})}
+                  label="Action Type"
+                >
+                  <MenuItem value="">All</MenuItem>
+                  <MenuItem value="LOGIN">Login</MenuItem>
+                  <MenuItem value="VIEW_FILES">View Files</MenuItem>
+                  <MenuItem value="DOWNLOAD_FILE">Download File</MenuItem>
+                  <MenuItem value="PLAY_FILE">Play File</MenuItem>
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12} sm={6} md={3}>
+              <TextField
+                fullWidth
+                size="small"
+                label="Start Date"
+                type="date"
+                value={auditFilters.startDate}
+                onChange={(e) => setAuditFilters({...auditFilters, startDate: e.target.value})}
+                InputLabelProps={{ shrink: true }}
+              />
+            </Grid>
+            <Grid item xs={12} sm={6} md={3}>
+              <TextField
+                fullWidth
+                size="small"
+                label="End Date"
+                type="date"
+                value={auditFilters.endDate}
+                onChange={(e) => setAuditFilters({...auditFilters, endDate: e.target.value})}
+                InputLabelProps={{ shrink: true }}
+              />
+            </Grid>
+            <Grid item xs={12} sm={6} md={3}>
+              <Button
+                fullWidth
+                variant="contained"
+                onClick={() => fetchAuditLogs(1)}
+                disabled={auditLoading}
+              >
+                Search Logs
+              </Button>
+            </Grid>
+          </Grid>
+
+          {auditLoading ? (
+            <LinearProgress />
+          ) : (
+            <TableContainer>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Timestamp</TableCell>
+                    <TableCell>User</TableCell>
+                    <TableCell>Action</TableCell>
+                    <TableCell>File</TableCell>
+                    <TableCell>IP Address</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {auditLogs.map((log) => (
+                    <TableRow key={log.id}>
+                      <TableCell>{new Date(log.action_timestamp).toLocaleString()}</TableCell>
+                      <TableCell>{log.user_email}</TableCell>
+                      <TableCell>
+                        <Chip 
+                          label={log.action_type} 
+                          size="small"
+                          color={log.action_type === 'LOGIN' ? 'success' : 
+                                 log.action_type === 'DOWNLOAD_FILE' ? 'warning' : 'default'}
+                        />
+                      </TableCell>
+                      <TableCell>{log.file_path ? log.file_path.split('/').pop() : '-'}</TableCell>
+                      <TableCell>{log.ip_address || '-'}</TableCell>
+                    </TableRow>
+                  ))}
+                  {auditLogs.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={5} align="center">
+                        No audit logs found. Click "Search Logs" to load recent activity.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
+        </Paper>
+      )}
+
+      {currentTab === 2 && (
+        <Paper elevation={1} sx={{ p: 3, mb: 3, backgroundColor: darkMode ? 'grey.900' : 'grey.50' }}>
+          <Typography variant="h6" gutterBottom>
+            User Sessions
+          </Typography>
+          
+          <Box sx={{ mb: 3 }}>
+            <Button
+              variant="contained"
+              onClick={() => fetchUserSessions(1)}
+            >
+              Load User Sessions
+            </Button>
+          </Box>
+
+          <TableContainer>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>User</TableCell>
+                  <TableCell>Login Time</TableCell>
+                  <TableCell>Logout Time</TableCell>
+                  <TableCell>Duration</TableCell>
+                  <TableCell>IP Address</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {userSessions.map((session) => (
+                  <TableRow key={session.id}>
+                    <TableCell>{session.user_email}</TableCell>
+                    <TableCell>{new Date(session.login_time).toLocaleString()}</TableCell>
+                    <TableCell>{session.logout_time ? new Date(session.logout_time).toLocaleString() : 'Active'}</TableCell>
+                    <TableCell>
+                      {session.session_duration_ms ? 
+                        `${Math.round(session.session_duration_ms / 1000 / 60)} min` : 
+                        'Ongoing'}
+                    </TableCell>
+                    <TableCell>{session.ip_address || '-'}</TableCell>
+                  </TableRow>
+                ))}
+                {userSessions.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={5} align="center">
+                      No user sessions found. Click "Load User Sessions" to see recent logins.
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </Paper>
+      )}
 
       <Paper elevation={1} sx={{ p: 3, backgroundColor: darkMode ? 'grey.900' : 'grey.50' }}>
         <Typography variant="h6" gutterBottom>

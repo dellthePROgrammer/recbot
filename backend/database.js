@@ -45,6 +45,50 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_files_composite ON files(call_date, phone, email);
 `);
 
+// Create audit logging tables
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    user_email TEXT NOT NULL,
+    login_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    logout_time DATETIME,
+    session_duration_ms INTEGER,
+    ip_address TEXT,
+    user_agent TEXT
+  );
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    user_email TEXT NOT NULL,
+    action_type TEXT NOT NULL, -- 'LOGIN', 'LOGOUT', 'PLAY_FILE', 'DOWNLOAD_FILE', 'VIEW_FILES'
+    file_path TEXT, -- For file-related actions
+    file_phone TEXT, -- Phone from file metadata
+    file_email TEXT, -- Email from file metadata
+    action_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    ip_address TEXT,
+    user_agent TEXT,
+    session_id TEXT,
+    additional_data TEXT -- JSON string for extra context
+  );
+`);
+
+// Create indexes for audit logs
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
+  CREATE INDEX IF NOT EXISTS idx_user_sessions_login_time ON user_sessions(login_time);
+  CREATE INDEX IF NOT EXISTS idx_user_sessions_user_email ON user_sessions(user_email);
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_action_type ON audit_logs(action_type);
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(action_timestamp);
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_user_email ON audit_logs(user_email);
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_file_path ON audit_logs(file_path);
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_composite ON audit_logs(user_id, action_type, action_timestamp);
+`);
+
 // Prepared statements for performance
 const statements = {
   // Insert or update file metadata
@@ -122,6 +166,51 @@ const statements = {
   getFilesByDateRange: db.prepare(`
     SELECT file_path FROM files 
     WHERE call_date >= ? AND call_date <= ?
+  `),
+  
+  // Audit logging statements
+  createUserSession: db.prepare(`
+    INSERT INTO user_sessions (user_id, user_email, ip_address, user_agent)
+    VALUES (?, ?, ?, ?)
+  `),
+  
+  updateUserSession: db.prepare(`
+    UPDATE user_sessions 
+    SET logout_time = CURRENT_TIMESTAMP, 
+        session_duration_ms = (strftime('%s', 'now') - strftime('%s', login_time)) * 1000
+    WHERE user_id = ? AND logout_time IS NULL
+  `),
+  
+  createAuditLog: db.prepare(`
+    INSERT INTO audit_logs (user_id, user_email, action_type, file_path, file_phone, file_email, 
+                           ip_address, user_agent, session_id, additional_data)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  
+  getAuditLogs: db.prepare(`
+    SELECT * FROM audit_logs 
+    WHERE (? IS NULL OR user_id = ?)
+      AND (? IS NULL OR action_type = ?)
+      AND (? IS NULL OR DATE(action_timestamp) >= ?)
+      AND (? IS NULL OR DATE(action_timestamp) <= ?)
+    ORDER BY action_timestamp DESC 
+    LIMIT ? OFFSET ?
+  `),
+  
+  getUserSessions: db.prepare(`
+    SELECT * FROM user_sessions 
+    WHERE (? IS NULL OR user_id = ?)
+      AND (? IS NULL OR DATE(login_time) >= ?)
+      AND (? IS NULL OR DATE(login_time) <= ?)
+    ORDER BY login_time DESC 
+    LIMIT ? OFFSET ?
+  `),
+  
+  getLastLogin: db.prepare(`
+    SELECT login_time FROM user_sessions 
+    WHERE user_id = ? 
+    ORDER BY login_time DESC 
+    LIMIT 1
   `)
 };
 
@@ -312,6 +401,91 @@ export function getDatabaseStats() {
       databasePath: DB_PATH,
       databaseSize: 0
     };
+  }
+}
+
+// Audit logging functions
+export function logUserSession(userId, userEmail, ipAddress, userAgent) {
+  try {
+    const result = statements.createUserSession.run(userId, userEmail, ipAddress, userAgent);
+    console.log(`📋 [AUDIT] User session created for ${userEmail} (ID: ${userId})`);
+    return result.lastInsertRowid;
+  } catch (error) {
+    console.error('Error creating user session:', error);
+    return null;
+  }
+}
+
+export function logUserLogout(userId) {
+  try {
+    statements.updateUserSession.run(userId);
+    console.log(`📋 [AUDIT] User session ended for ${userId}`);
+  } catch (error) {
+    console.error('Error updating user session:', error);
+  }
+}
+
+export function logAuditEvent(userId, userEmail, actionType, filePath = null, fileMetadata = null, ipAddress = null, userAgent = null, sessionId = null, additionalData = null) {
+  try {
+    const filePhone = fileMetadata?.phone || null;
+    const fileEmail = fileMetadata?.email || null;
+    const additionalDataStr = additionalData ? JSON.stringify(additionalData) : null;
+    
+    statements.createAuditLog.run(
+      userId, 
+      userEmail, 
+      actionType, 
+      filePath, 
+      filePhone, 
+      fileEmail, 
+      ipAddress, 
+      userAgent, 
+      sessionId, 
+      additionalDataStr
+    );
+    
+    console.log(`📋 [AUDIT] ${actionType} logged for ${userEmail}${filePath ? ` - File: ${filePath}` : ''}`);
+  } catch (error) {
+    console.error('Error creating audit log:', error);
+  }
+}
+
+export function getAuditLogs(userId = null, actionType = null, startDate = null, endDate = null, limit = 100, offset = 0) {
+  try {
+    return statements.getAuditLogs.all(
+      userId, userId,
+      actionType, actionType,
+      startDate, startDate,
+      endDate, endDate,
+      limit, offset
+    );
+  } catch (error) {
+    console.error('Error getting audit logs:', error);
+    return [];
+  }
+}
+
+export function getUserSessions(userId = null, startDate = null, endDate = null, limit = 100, offset = 0) {
+  try {
+    return statements.getUserSessions.all(
+      userId, userId,
+      startDate, startDate,
+      endDate, endDate,
+      limit, offset
+    );
+  } catch (error) {
+    console.error('Error getting user sessions:', error);
+    return [];
+  }
+}
+
+export function getLastLogin(userId) {
+  try {
+    const result = statements.getLastLogin.get(userId);
+    return result?.login_time || null;
+  } catch (error) {
+    console.error('Error getting last login:', error);
+    return null;
   }
 }
 

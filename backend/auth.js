@@ -1,4 +1,5 @@
 import { clerkMiddleware, getAuth, clerkClient } from '@clerk/express';
+import { logUserSession, logAuditEvent, getLastLogin } from './database.js';
 
 // Initialize Clerk with required environment variables
 if (!process.env.CLERK_SECRET_KEY) {
@@ -57,13 +58,33 @@ export const requireAuth = async (req, res, next) => {
     
     console.log(`✅ [DOMAIN ACCESS] User ${userEmail} granted access (@mtgpros.com domain, verified)`);
 
+    // Get client IP and user agent for audit logging
+    const ipAddress = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
+    const userAgent = req.headers['user-agent'] || 'unknown';
+    
+    // Check if this is a new session (check last login)
+    const lastLogin = getLastLogin(user.id);
+    const now = new Date();
+    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+    
+    // If no last login or last login was more than 1 hour ago, log new session
+    if (!lastLogin || new Date(lastLogin) < oneHourAgo) {
+      logUserSession(user.id, userEmail, ipAddress, userAgent);
+      logAuditEvent(user.id, userEmail, 'LOGIN', null, null, ipAddress, userAgent, null, {
+        lastLogin: lastLogin,
+        loginTime: now.toISOString()
+      });
+    }
+
     // Add user info to request for easier access
     req.user = {
       id: user.id,
       email: userEmail,
       role: user.publicMetadata?.role || null,
       firstName: user.firstName,
-      lastName: user.lastName
+      lastName: user.lastName,
+      ipAddress: ipAddress,
+      userAgent: userAgent
     };
     
     next();

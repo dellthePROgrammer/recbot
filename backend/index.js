@@ -15,7 +15,7 @@ import {
   PutObjectCommand,
   HeadObjectCommand
 } from "@aws-sdk/client-s3";
-import { queryFiles, indexFiles, indexFile, getDatabaseStats } from './database.js';
+import { queryFiles, indexFiles, indexFile, getDatabaseStats, getAuditLogs, getUserSessions } from './database.js';
 import { clerkAuth, requireAuth, requireAdmin, requireMemberOrAdmin, requireAuthenticatedUser, requireManagerOrAdmin } from './auth.js';
 
 dayjs.extend(customParseFormat);
@@ -660,6 +660,74 @@ app.get('/api/database-stats', requireAuth, requireAdmin, (req, res) => {
     res.json(stats);
   } catch (err) {
     console.error('Error getting database stats:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Audit logs endpoint - admin only
+app.get('/api/audit-logs', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const {
+      userId,
+      actionType,
+      startDate,
+      endDate,
+      limit = 100,
+      offset = 0
+    } = req.query;
+
+    const auditLogs = getAuditLogs(
+      userId || null,
+      actionType || null,
+      startDate || null,
+      endDate || null,
+      parseInt(limit),
+      parseInt(offset)
+    );
+
+    res.json({
+      logs: auditLogs,
+      pagination: {
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        hasMore: auditLogs.length === parseInt(limit)
+      }
+    });
+  } catch (err) {
+    console.error('Error getting audit logs:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// User sessions endpoint - admin only
+app.get('/api/user-sessions', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const {
+      userId,
+      startDate,
+      endDate,
+      limit = 100,
+      offset = 0
+    } = req.query;
+
+    const sessions = getUserSessions(
+      userId || null,
+      startDate || null,
+      endDate || null,
+      parseInt(limit),
+      parseInt(offset)
+    );
+
+    res.json({
+      sessions,
+      pagination: {
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        hasMore: sessions.length === parseInt(limit)
+      }
+    });
+  } catch (err) {
+    console.error('Error getting user sessions:', err);
     res.status(500).json({ error: err.message });
   }
 });
