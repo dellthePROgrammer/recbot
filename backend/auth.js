@@ -32,11 +32,24 @@ export const requireAuth = async (req, res, next) => {
     if (!user) {
       return res.status(401).json({ error: 'User not found' });
     }
+
+    const userEmail = user.emailAddresses?.[0]?.emailAddress;
     
+    // DOMAIN RESTRICTION: Only allow @mtgpros.com domain
+    if (!userEmail || !userEmail.endsWith('@mtgpros.com')) {
+      console.log(`🚫 [DOMAIN ACCESS DENIED] User ${userEmail} attempted access - not @mtgpros.com domain`);
+      return res.status(403).json({ 
+        error: 'Access denied', 
+        message: 'Access is restricted to @mtgpros.com email addresses only' 
+      });
+    }
+    
+    console.log(`✅ [DOMAIN ACCESS] User ${userEmail} granted access (@mtgpros.com domain)`);
+
     // Add user info to request for easier access
     req.user = {
       id: user.id,
-      email: user.emailAddresses?.[0]?.emailAddress,
+      email: userEmail,
       role: user.publicMetadata?.role || null,
       firstName: user.firstName,
       lastName: user.lastName

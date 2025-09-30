@@ -11,6 +11,8 @@ import {
   CssBaseline,
   Button,
   Container,
+  Paper,
+  Alert,
 } from "@mui/material";
 import { ThemeProvider, createTheme } from "@mui/material/styles";
 import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
@@ -20,6 +22,47 @@ import AdminPage from './AdminPage';
 
 // Try build-time env var first, then runtime config
 const CLERK_PUBLISHABLE_KEY = process.env.REACT_APP_CLERK_PUBLISHABLE_KEY;
+
+// Domain validation component
+function DomainValidator({ children }) {
+  const { user, isLoaded } = useUser();
+  
+  if (!isLoaded) {
+    return <div>Loading...</div>;
+  }
+  
+  const userEmail = user?.emailAddresses?.[0]?.emailAddress;
+  
+  // Check if user email is from allowed domain
+  if (!userEmail || !userEmail.endsWith('@mtgpros.com')) {
+    return (
+      <Container maxWidth="md" sx={{ mt: 8 }}>
+        <Paper sx={{ p: 4, textAlign: 'center' }}>
+          <Alert severity="error" sx={{ mb: 3 }}>
+            <Typography variant="h5" gutterBottom>
+              Access Denied
+            </Typography>
+            <Typography variant="body1" paragraph>
+              Access to this application is restricted to users with <strong>@mtgpros.com</strong> email addresses only.
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Your current email: <strong>{userEmail || 'No email found'}</strong>
+            </Typography>
+          </Alert>
+          <Box sx={{ mt: 3 }}>
+            <Typography variant="body2" color="text.secondary" paragraph>
+              If you believe this is an error, please contact your administrator.
+            </Typography>
+            <UserButton afterSignOutUrl="/" />
+          </Box>
+        </Paper>
+      </Container>
+    );
+  }
+  
+  // User has valid domain, render the app
+  return children;
+}
 
 function Navigation({ darkMode, setDarkMode }) {
   const { user } = useUser();
@@ -72,12 +115,14 @@ function AppContent() {
       <LocalizationProvider dateAdapter={AdapterDayjs}>
         <Router>
           <SignedIn>
-            <Navigation darkMode={darkMode} setDarkMode={setDarkMode} />
-            <Routes>
-              <Route path="/" element={<FileViewer darkMode={darkMode} />} />
-              <Route path="/admin" element={<AdminPage darkMode={darkMode} />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
+            <DomainValidator>
+              <Navigation darkMode={darkMode} setDarkMode={setDarkMode} />
+              <Routes>
+                <Route path="/" element={<FileViewer darkMode={darkMode} />} />
+                <Route path="/admin" element={<AdminPage darkMode={darkMode} />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </DomainValidator>
           </SignedIn>
           
           <SignedOut>
