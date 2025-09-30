@@ -195,8 +195,137 @@ function FileViewer({ darkMode }) {
     fetchFiles(calendarDateStart, calendarDateEnd, newOffset);
   };
 
+  // Optimized waveform generation with chunked processing
+  // Legacy waveform generation function (deprecated - now using backend API)
+  const generateWaveformDataOptimized = async (audioBlob, filename) => {
+    console.log('⚠️ Legacy waveform function called - now using backend API');
+    return; // Skip legacy processing
+    try {
+      setIsGeneratingWaveform(true);
+      
+      // Create audio context for analysis
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const arrayBuffer = await audioBlob.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      
+      // Get channel data
+      const channelData = audioBuffer.getChannelData(0);
+      const sampleRate = audioBuffer.sampleRate;
+      const duration = audioBuffer.duration;
+      
+      // Reduce resolution for faster processing on long files
+      const maxWaveformWidth = 600; // Fewer points for better performance
+      const waveformWidth = Math.min(maxWaveformWidth, Math.floor(duration * 10)); // 10 points per second max
+      const samplesPerPixel = Math.floor(channelData.length / waveformWidth);
+      const waveform = [];
+      
+      // Process in chunks to avoid blocking the UI
+      const chunkSize = 50; // Process 50 points at a time
+      
+      const processChunk = async (startIndex) => {
+        const endIndex = Math.min(startIndex + chunkSize, waveformWidth);
+        
+        for (let i = startIndex; i < endIndex; i++) {
+          const startSample = i * samplesPerPixel;
+          const endSample = Math.min(startSample + samplesPerPixel, channelData.length);
+          
+          // Calculate RMS for this pixel (simplified for speed)
+          let sum = 0;
+          let count = 0;
+          const step = Math.max(1, Math.floor((endSample - startSample) / 100)); // Sample every nth point for speed
+          
+          for (let j = startSample; j < endSample; j += step) {
+            sum += channelData[j] * channelData[j];
+            count++;
+          }
+          
+          const rms = count > 0 ? Math.sqrt(sum / count) : 0;
+          const amplitude = Math.min(1, rms * 4); // Amplify for visibility
+          waveform.push(amplitude);
+        }
+        
+        // Update UI with partial waveform
+        if (waveform.length > 0) {
+          setWaveformData({
+            data: [...waveform], // Copy array to trigger re-render
+            duration: duration,
+            filename: filename,
+            sampleRate: sampleRate,
+            isPartial: endIndex < waveformWidth
+          });
+        }
+        
+        // Continue processing if not done
+        if (endIndex < waveformWidth) {
+          // Yield control back to browser
+          setTimeout(() => processChunk(endIndex), 5);
+        } else {
+          // Final update
+          setWaveformData({
+            data: waveform,
+            duration: duration,
+            filename: filename,
+            sampleRate: sampleRate,
+            isPartial: false
+          });
+          
+          console.log('Optimized waveform generated:', {
+            filename,
+            duration,
+            dataPoints: waveform.length,
+            maxAmplitude: Math.max(...waveform),
+            avgAmplitude: waveform.reduce((a, b) => a + b, 0) / waveform.length
+          });
+          
+          setIsGeneratingWaveform(false);
+          audioContext.close();
+        }
+      };
+      
+      // Start processing
+      processChunk(0);
+      
+    } catch (error) {
+      console.error('Failed to generate optimized waveform:', error);
+      setIsGeneratingWaveform(false);
+    }
+  };
+
+  // Generate waveform data asynchronously in background
+  // Legacy waveform generation function (deprecated - now using backend API)
+  const generateWaveformDataAsync = async (token, filename) => {
+    console.log('⚠️ Legacy waveform function called - now using backend API');
+    return; // Skip legacy processing
+    try {
+      setIsGeneratingWaveform(true);
+      
+      // Fetch audio data for waveform analysis
+      const response = await fetch(`/api/audio/${encodeURIComponent(filename)}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      
+      if (!response.ok) {
+        console.error('Failed to fetch audio for waveform:', response.status);
+        return;
+      }
+      
+      const audioBlob = await response.blob();
+      await generateWaveformData(audioBlob, filename);
+      
+    } catch (error) {
+      console.error('Failed to generate waveform asynchronously:', error);
+    } finally {
+      setIsGeneratingWaveform(false);
+    }
+  };
+
   // Generate waveform data from audio blob
+  // Legacy waveform generation function (deprecated - now using backend API)
   const generateWaveformData = async (audioBlob, filename) => {
+    console.log('⚠️ Legacy waveform function called - now using backend API');
+    return; // Skip legacy processing
     try {
       setIsGeneratingWaveform(true);
       
@@ -275,31 +404,10 @@ function FileViewer({ darkMode }) {
       // Get authentication token
       const token = await getToken();
       
-      // Create new audio element with auth headers
+      // Create new audio element
       const audio = new Audio();
       
-      // Set up audio source with authentication
-      const response = await fetch(`/api/audio/${encodeURIComponent(filename)}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      
-      if (!response.ok) {
-        console.error('Failed to load audio:', response.status);
-        return;
-      }
-      
-      // Convert response to blob and create object URL
-      const audioBlob = await response.blob();
-      const audioUrl = URL.createObjectURL(audioBlob);
-      audio.src = audioUrl;
-      audio.volume = volume; // Set initial volume
-      
-      // Generate waveform data
-      generateWaveformData(audioBlob, filename);
-      
-      // Set up event listeners
+      // OPTIMIZATION 1: Set up event listeners FIRST
       audio.addEventListener('loadedmetadata', () => {
         setDuration(audio.duration);
       });
@@ -313,8 +421,7 @@ function FileViewer({ darkMode }) {
         setIsPlaying(false);
         setCurrentTrack(null);
         setCurrentTime(0);
-        setWaveformData(null); // Clear waveform data
-        URL.revokeObjectURL(audioUrl); // Clean up blob URL
+        setWaveformData(null);
       });
       
       audio.addEventListener('error', (e) => {
@@ -322,14 +429,94 @@ function FileViewer({ darkMode }) {
         setPlaying(null);
         setIsPlaying(false);
         setCurrentTrack(null);
-        setWaveformData(null); // Clear waveform data
+        setWaveformData(null);
+      });
+
+      // OPTIMIZATION 2: Set volume immediately
+      audio.volume = volume;
+      
+      // OPTIMIZATION 3: Start UI updates immediately (optimistic)
+      setCurrentTrack(filename);
+      
+      console.log('🎵 Streaming audio for:', filename);
+      const startTime = performance.now();
+      
+      // Set the audio source to stream directly from the server
+      // No blob creation - direct streaming!
+      const streamUrl = `/api/audio/${encodeURIComponent(filename)}`;
+      
+      // For direct streaming, we need to handle auth differently
+      // Create a fetch request but don't await the blob - use the URL directly
+      const authResponse = await fetch(streamUrl, {
+        method: 'HEAD', // Just check auth
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
       });
       
-      // Start playback
-      await audio.play();
-      setPlaying(audio);
-      setIsPlaying(true);
-      setCurrentTrack(filename);
+      if (!authResponse.ok) {
+        console.error('Failed to authenticate for audio stream:', authResponse.status);
+        setCurrentTrack(null);
+        return;
+      }
+      
+      // Now set the audio source to stream directly
+      // Note: This won't work with auth headers, so we need a different approach
+      // Let's create a signed URL or use a session-based approach
+      audio.src = `${streamUrl}?auth=${encodeURIComponent(token)}`;
+      
+      console.log('🔗 Audio streaming URL set:', streamUrl);
+      
+      const loadTime = performance.now() - startTime;
+      console.log(`⚡ Audio stream URL set in ${loadTime.toFixed(2)}ms`);
+      
+      // OPTIMIZATION 4: Start playback as soon as audio is ready
+      const playStartTime = performance.now();
+      
+      try {
+        await audio.play();
+        const playTime = performance.now() - playStartTime;
+        console.log(`🚀 Playback started in ${playTime.toFixed(0)}ms (Total: ${(performance.now() - startTime).toFixed(0)}ms)`);
+        
+        setPlaying(audio);
+        setIsPlaying(true);
+        
+      } catch (playError) {
+        console.error('Failed to start playback:', playError);
+        setCurrentTrack(null);
+        cleanup();
+        return;
+      }
+      
+      // OPTIMIZATION 6: Generate waveform from backend API
+      setTimeout(async () => {
+        console.log('🌊 Starting backend waveform generation...');
+        try {
+          const waveformResponse = await fetch(`/api/waveform/${encodeURIComponent(filename)}`, {
+            headers: {
+              'Authorization': `Bearer ${token}`
+            }
+          });
+          
+          if (waveformResponse.ok) {
+            const waveformResult = await waveformResponse.json();
+            setWaveformData(waveformResult.waveform);
+            console.log(`📊 Waveform loaded: ${waveformResult.waveform.length} points (${waveformResult.cached ? 'cached' : 'generated'})`);
+            if (!waveformResult.cached && waveformResult.generationTime) {
+              console.log(`⏱️ Waveform generation took: ${waveformResult.generationTime}ms`);
+              if (waveformResult.duration) {
+                console.log(`🎵 Audio duration: ${waveformResult.duration.toFixed(1)}s, Sample rate: ${waveformResult.sampleRate}Hz`);
+                console.log(`🎯 Time per waveform point: ${(waveformResult.duration / waveformResult.waveform.length).toFixed(3)}s`);
+                console.log(`📄 Waveform source: ${waveformResult.source || 'unknown'}`);
+              }
+            }
+          } else {
+            console.error('Failed to load waveform:', waveformResponse.status);
+          }
+        } catch (waveformError) {
+          console.error('Error loading waveform:', waveformError);
+        }
+      }, 25); // Minimal delay to ensure playback takes priority
       
     } catch (error) {
       console.error('Error playing audio:', error);
@@ -557,9 +744,9 @@ function FileViewer({ darkMode }) {
             <Box>
               <Typography variant="subtitle2" noWrap sx={{ mb: 2 }}>
                 Now Playing: {currentTrack.split('/').pop()}
-                {waveformData && (
+                {waveformData && Array.isArray(waveformData) && (
                   <span style={{ fontSize: '0.7em', opacity: 0.7, marginLeft: '10px' }}>
-                    (Waveform: {waveformData.data.length} points)
+                    (Waveform: {waveformData.length} points)
                   </span>
                 )}
               </Typography>
@@ -582,7 +769,7 @@ function FileViewer({ darkMode }) {
                   }}
                 >
                   {/* Waveform Visualization */}
-                  {waveformData && waveformData.filename === currentTrack ? (
+                  {waveformData && Array.isArray(waveformData) && currentTrack ? (
                     <Box sx={{ 
                       position: 'absolute', 
                       top: 0, 
@@ -596,20 +783,33 @@ function FileViewer({ darkMode }) {
                       gap: 0.1
                     }}>
                       {/* Waveform bars */}
-                      {waveformData.data.map((amplitude, index) => (
+                      {waveformData && Array.isArray(waveformData) && waveformData.map((amplitude, index) => {
+                        // Enhanced amplitude scaling for better visibility
+                        const minHeight = 2;
+                        const maxHeight = 45;
+                        const scaledHeight = Math.max(minHeight, amplitude * maxHeight);
+                        
+                        // Color intensity based on amplitude
+                        const intensity = Math.min(1, amplitude * 2); // Amplify for color
+                        const color = darkMode 
+                          ? `rgba(144, 202, 249, ${0.3 + intensity * 0.7})` 
+                          : `rgba(25, 118, 210, ${0.4 + intensity * 0.6})`;
+                        
+                        return (
                         <Box
                           key={index}
                           sx={{
                             flex: '1 1 0px', // Equal width distribution
                             minWidth: '1px',
                             maxWidth: '2px',
-                            height: Math.max(3, amplitude * 50) + 'px', // Slightly larger scale
-                            backgroundColor: darkMode ? '#90caf9' : '#1976d2',
+                            height: scaledHeight + 'px',
+                            backgroundColor: color,
                             borderRadius: '1px 1px 0 0', // Rounded top
                             opacity: 0.8
                           }}
                         />
-                      ))}
+                        );
+                      })}
                       
                       {/* Progress overlay */}
                       <Box sx={{
@@ -633,6 +833,27 @@ function FileViewer({ darkMode }) {
                         transform: 'translateX(-1px)',
                         transition: 'left 0.1s ease'
                       }} />
+                      
+                      {/* Waveform generation progress indicator */}
+                      {isGeneratingWaveform && (
+                        <Box sx={{
+                          position: 'absolute',
+                          top: 4,
+                          right: 4,
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 0.5,
+                          backgroundColor: 'rgba(0,0,0,0.7)',
+                          borderRadius: 1,
+                          px: 1,
+                          py: 0.5
+                        }}>
+                          <CircularProgress size={12} sx={{ color: '#fff' }} />
+                          <Typography variant="caption" sx={{ color: '#fff', fontSize: '0.6rem' }}>
+                            {waveformData?.isPartial ? 'Building...' : 'Analyzing...'}
+                          </Typography>
+                        </Box>
+                      )}
                     </Box>
                   ) : isGeneratingWaveform ? (
                     // Loading state while generating waveform
