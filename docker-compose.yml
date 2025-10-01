@@ -20,7 +20,7 @@ services:
       - "./letsencrypt:/letsencrypt"
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
   recbot:
-    image: ghostreaper69/recbot:v1.3.1
+    image: ghostreaper69/recbot:v1.5.23
     container_name: "recbot"
     labels:
       - traefik.enable=true
@@ -35,28 +35,43 @@ services:
       - "4000:4000"
       #- "2222:2222"
     environment:
+      # --- Core App Configuration ---
+      - NODE_ENV=production
+      - PORT=4000
       - STORAGE_TYPE=aws
+      - WAV_DIR=/data/wav
+      - DB_PATH=/root/db/recbot.db
+
+      # --- AWS S3 (required) ---
       - AWS_ACCESS_KEY_ID=your-aws-access-key-id-here
       - AWS_SECRET_ACCESS_KEY=your-aws-secret-access-key-here
       - AWS_REGION=your-aws-region-here
       - AWS_BUCKET=your-aws-bucket-name-here
-      - REACT_APP_API_URL=https://your-domain-here/api
-      - BETTERAUTH_CLIENT_ID=your-betterauth-client-id-here
-      - BETTERAUTH_CLIENT_SECRET=your-betterauth-client-secret-here
-      - BETTERAUTH_REDIRECT_URI=https://your-domain-here/auth/callback
-      - REACT_APP_CLERK_PUBLISHABLE_KEY=pk_test_your_clerk_publishable_key_here
+
+      # --- Clerk Authentication ---
       - CLERK_PUBLISHABLE_KEY=pk_test_your_clerk_publishable_key_here
       - CLERK_SECRET_KEY=sk_test_your_clerk_secret_key_here
-      #- GOOGLE_CLIENT_ID=your_google_client_id_here
-      #- GOOGLE_CLIENT_SECRET=your_google_client_secret_here
-      #- GOOGLE_REDIRECT_URI=http://your-domain-here/auth/google/callback
-      #- B2_ACCOUNT=your_b2_key_id
-      #- B2_KEY=your_b2_key
-      #- B2_BUCKET=your_b2_bucket_name
+      - ALLOWED_EMAIL_DOMAIN=mtgpros.com
+      - REACT_APP_CLERK_PUBLISHABLE_KEY=pk_test_your_clerk_publishable_key_here
+
+      # --- Session & Security Controls ---
+      - MAX_SESSION_HOURS=4
+      - MAX_INACTIVITY_MINUTES=30
+      - MAX_ACTIVE_WINDOW_MIN=30
+
+      # --- Frontend Runtime Config (if SPA served separately) ---
+      - REACT_APP_API_URL=https://your-domain-here/api
+
+      # --- Optional / Feature Flags ---
       - ENABLE_SFTP=false
       #- SFTP_USER=root
       #- SFTP_PASS=your_sftp_password_here
-      - WAV_DIR=/data/wav
+      #- EXTRA_LOGGING=true
+      #- LOG_LEVEL=info
+
+      # --- Future / Reserved Variables (uncomment as needed) ---
+      #- CDN_BASE_URL=https://cdn.your-domain-here
+      #- FORCE_HTTPS=true
     restart: unless-stopped
     cap_add:
       - SYS_ADMIN  # Required for FUSE
