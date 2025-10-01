@@ -15,7 +15,7 @@ import {
   PutObjectCommand,
   HeadObjectCommand
 } from "@aws-sdk/client-s3";
-import { queryFiles, indexFiles, indexFile, getDatabaseStats, getAuditLogs, getUserSessions, logAuditEvent, parseFileMetadata, logUserLogout, logUserSession, getDistinctUsers, expireStaleSessions, touchUserSession, expireInactiveSessions, repairOpenSessions, backfillExpiredOpenSessions } from './database.js';
+import { queryFiles, indexFiles, indexFile, getDatabaseStats, getAuditLogs, getUserSessions, logAuditEvent, parseFileMetadata, logUserLogout, logUserSession, getDistinctUsers, expireStaleSessions, touchUserSession, expireInactiveSessions, repairOpenSessions, backfillExpiredOpenSessions, backfillFileMetadata, backfillAuditLogCallIds } from './database.js';
 import { clerkAuth, requireAuth, requireAdmin, requireMemberOrAdmin, requireAuthenticatedUser, requireManagerOrAdmin } from './auth.js';
 
 dayjs.extend(customParseFormat);
@@ -368,7 +368,7 @@ app.get('/api/audio/*', requireAuth, ensureSession, async (req, res) => {
         req.user.ipAddress,
         req.user.userAgent,
         req.currentSessionId || null,
-        { cacheHit: cacheInfo, userRole: req.user.role }
+        { cacheHit: cacheInfo, userRole: req.user.role, callId: meta.callId || meta.call_id || null, durationMs: meta.durationMs || meta.duration_ms || meta.durationMs }
       );
     } catch (e) {
       console.error('⚠️ [AUDIT PLAY] Consolidated log failed:', e);
@@ -705,14 +705,16 @@ app.get('/api/download/*', requireAuth, ensureSession, requireManagerOrAdmin, as
         req.user.email,
         'DOWNLOAD_FILE',
         filename,
-        meta.phone || null,
+        meta,
         req.user.ipAddress,
         req.user.userAgent,
-        meta.duration || null,
+        req.currentSessionId || null,
         {
           userRole: req.user.role,
-          date: meta.date || null,
-          time: meta.time || null
+          date: meta.callDate || meta.date || null,
+            time: meta.callTime || meta.time || null,
+            callId: meta.callId || meta.call_id || null,
+            durationMs: meta.durationMs || meta.duration_ms || null
         }
       );
     } catch (auditErr) {
@@ -802,17 +804,24 @@ app.get('/api/wav-files', requireAuth, ensureSession, requireAuthenticatedUser, 
       durationMin: durationMin ? parseInt(durationMin) : null,
       timeStart,
       timeEnd,
+      callId: req.query.callId ? req.query.callId.trim() : null,
       sortColumn,
       sortDirection,
       limit: parseInt(limit) || 25,
       offset: parseInt(offset) || 0
     });
 
-    // Convert database format back to frontend format
-    const files = result.files.map(file => file.file_path);
-
     res.json({
-      files,
+      files: result.files.map(f => ({
+        path: f.file_path,
+        phone: f.phone,
+        email: f.email,
+        date: f.call_date,
+        time: f.call_time,
+        callId: f.call_id,
+        durationMs: f.duration_ms,
+        size: f.file_size
+      })),
       totalCount: result.totalCount,
       offset: parseInt(offset) || 0,
       limit: parseInt(limit) || 25,
@@ -916,6 +925,7 @@ app.get('/api/audit-logs', requireAuth, ensureSession, requireAdmin, (req, res) 
       actionType,
       startDate,
       endDate,
+      callId,
       limit = 100,
       offset = 0
     } = req.query;
@@ -925,6 +935,7 @@ app.get('/api/audit-logs', requireAuth, ensureSession, requireAdmin, (req, res) 
       actionType || null,
       startDate || null,
       endDate || null,
+      callId || null, // LIKE filtering handled in prepared statement
       parseInt(limit),
       parseInt(offset)
     );
@@ -940,6 +951,19 @@ app.get('/api/audit-logs', requireAuth, ensureSession, requireAdmin, (req, res) 
   } catch (err) {
     console.error('Error getting audit logs:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Maintenance endpoint to backfill missing audit log call_ids from additional_data JSON
+app.post('/api/backfill-audit-callids', requireAuth, ensureSession, requireAdmin, (req, res) => {
+  try {
+    const { batchSize } = req.body || {};
+    const result = backfillAuditLogCallIds(batchSize || 500);
+    logAuditEvent(req.auth.userId, req.auth.user?.primaryEmailAddress?.emailAddress || '', 'MAINTENANCE', null, null, getClientIp(req), req.headers['user-agent'] || '', req.sessionId, { task: 'backfill_audit_call_ids', ...result });
+    res.json({ success: true, ...result });
+  } catch (e) {
+    console.error('Error backfilling audit call_ids:', e);
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 
@@ -1020,6 +1044,29 @@ app.post('/api/repair-sessions', requireAuth, ensureSession, requireAdmin, (req,
   } catch (e) {
     console.error('Error repairing sessions:', e);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// File metadata backfill (duration/callId) - admin only
+app.post('/api/backfill-files', requireAuth, ensureSession, requireAdmin, (req, res) => {
+  try {
+    const { batchSize = 500 } = req.body || {};
+    const result = backfillFileMetadata(Math.min(parseInt(batchSize) || 500, 5000));
+    logAuditEvent(
+      req.user.id,
+      req.user.email,
+      'MAINTENANCE',
+      null,
+      null,
+      req.user.ipAddress,
+      req.user.userAgent,
+      req.currentSessionId || null,
+      { maintenance: 'backfill_file_metadata', ...result }
+    );
+    res.json({ success: true, ...result });
+  } catch (e) {
+    console.error('Backfill endpoint error:', e);
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 

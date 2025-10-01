@@ -20,6 +20,7 @@ import {
   MenuItem,
   FormControl,
   InputLabel,
+  Tooltip,
   Pagination,
   Tabs,
   Tab,
@@ -56,7 +57,8 @@ function AdminPage({ darkMode }) {
     actionType: '',
     startDate: '',
     endDate: '',
-    userId: ''
+    userId: '',
+    callId: ''
   });
   const [userSuggestions, setUserSuggestions] = useState([]);
   const [userQuery, setUserQuery] = useState('');
@@ -86,6 +88,7 @@ function AdminPage({ darkMode }) {
   }, [userQuery, showUserPopper]);
   const [auditPage, setAuditPage] = useState(1);
   const [sessionsPage, setSessionsPage] = useState(1);
+  const callIdDebounceRef = React.useRef(null);
 
   // Check if user has admin role
   const isAdmin = user?.publicMetadata?.role === 'admin';
@@ -126,6 +129,7 @@ function AdminPage({ darkMode }) {
         ...(auditFilters.startDate && { startDate: auditFilters.startDate }),
         ...(auditFilters.endDate && { endDate: auditFilters.endDate }),
         ...(auditFilters.userId && { userId: auditFilters.userId }),
+        ...(auditFilters.callId && { callId: auditFilters.callId })
       });
 
       const response = await fetch(`/api/audit-logs?${params}`, {
@@ -141,6 +145,19 @@ function AdminPage({ darkMode }) {
       setAuditLoading(false);
     }
   };
+
+  // Debounced auto-fetch when callId changes to leverage LIKE filtering fluidly
+  useEffect(() => {
+    if (!isAdmin) return;
+    if (callIdDebounceRef.current) clearTimeout(callIdDebounceRef.current);
+    callIdDebounceRef.current = setTimeout(() => {
+      // Only auto fetch if user entered at least 2 chars or cleared the field
+      if (!auditFilters.callId || auditFilters.callId.trim().length >= 2) {
+        fetchAuditLogs(1);
+      }
+    }, 300);
+    return () => clearTimeout(callIdDebounceRef.current);
+  }, [auditFilters.callId]);
 
   const fetchUserSessions = async (page = 1) => {
     if (!isAdmin) return;
@@ -373,6 +390,19 @@ function AdminPage({ darkMode }) {
               </Box>
             </Grid>
             <Grid item xs={12} sm={6} md={3}>
+              <TextField
+                fullWidth
+                size="small"
+                label="Call ID (partial)"
+                placeholder="Enter full or partial call id"
+                value={auditFilters.callId}
+                onChange={(e) => setAuditFilters({ ...auditFilters, callId: e.target.value })}
+                onKeyDown={(e) => { if (e.key === 'Enter') fetchAuditLogs(1); }}
+                InputLabelProps={{ shrink: true }}
+                helperText={auditFilters.callId ? 'Substring match (case-insensitive)' : 'Supports substring match'}
+              />
+            </Grid>
+            <Grid item xs={12} sm={6} md={3}>
               <Button
                 fullWidth
                 variant="contained"
@@ -395,6 +425,7 @@ function AdminPage({ darkMode }) {
                     <TableCell>User</TableCell>
                     <TableCell>Action</TableCell>
                     <TableCell>File</TableCell>
+                    <TableCell>Call ID</TableCell>
                     <TableCell>IP Address</TableCell>
                   </TableRow>
                 </TableHead>
@@ -412,12 +443,48 @@ function AdminPage({ darkMode }) {
                         />
                       </TableCell>
                       <TableCell>{log.file_path ? log.file_path.split('/').pop() : '-'}</TableCell>
+                      <TableCell>{(() => {
+                        if (!log.additional_data) return '-';
+                        let raw;
+                        try { const meta = JSON.parse(log.additional_data); raw = meta.callId || meta.call_id || ''; } catch { raw = ''; }
+                        if (!raw) return '-';
+                        const q = (auditFilters.callId || '').trim();
+                        let contentNode = raw;
+                        let highlighted = false;
+                        if (q) {
+                          try {
+                            const regex = new RegExp(q.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&'), 'gi');
+                            if (regex.test(raw)) {
+                              highlighted = true;
+                              const parts = raw.split(regex);
+                              const matches = raw.match(regex) || [];
+                              const nodes = [];
+                              for (let i = 0; i < parts.length; i++) {
+                                nodes.push(<span key={`p${i}`}>{parts[i]}</span>);
+                                if (i < matches.length) {
+                                  nodes.push(<mark key={`m${i}`} style={{ backgroundColor: '#ffe58f', padding: '0 2px' }}>{matches[i]}</mark>);
+                                }
+                              }
+                              contentNode = <span>{nodes}</span>;
+                            }
+                          } catch {/* ignore */}
+                        }
+                        const needsTruncate = raw.length > 18 || highlighted;
+                        if (!needsTruncate) return raw;
+                        return (
+                          <Tooltip title={raw} arrow disableInteractive>
+                            <span style={{ display:'inline-block', maxWidth:140, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', verticalAlign:'middle' }}>
+                              {contentNode}
+                            </span>
+                          </Tooltip>
+                        );
+                      })()}</TableCell>
                       <TableCell>{log.ip_address || '-'}</TableCell>
                     </TableRow>
                   ))}
                   {auditLogs.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={5} align="center">
+                      <TableCell colSpan={6} align="center">
                         No audit logs found. Click "Search Logs" to load recent activity.
                       </TableCell>
                     </TableRow>

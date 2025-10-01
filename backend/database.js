@@ -27,6 +27,7 @@ db.exec(`
     email TEXT,
     call_date TEXT,  -- Store as YYYY-MM-DD for easy querying
     call_time TEXT,  -- Store as HH:MM:SS
+    call_id TEXT,    -- New: numeric call identifier extracted from filename
     duration_ms INTEGER,
     file_size INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -44,6 +45,22 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at);
   CREATE INDEX IF NOT EXISTS idx_files_composite ON files(call_date, phone, email);
 `);
+
+// Migration: ensure call_id column exists on files and index created AFTER confirmation
+try {
+  const fileCols = db.prepare("PRAGMA table_info(files)").all();
+  let hasCallId = fileCols.some(c => c.name === 'call_id');
+  if (!hasCallId) {
+    console.log('⚙️  [MIGRATION] Adding call_id column to files');
+    db.exec(`ALTER TABLE files ADD COLUMN call_id TEXT;`);
+    hasCallId = true;
+  }
+  if (hasCallId) {
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_files_call_id ON files(call_id);`);
+  }
+} catch (e) {
+  console.warn('⚠️  [MIGRATION] files.call_id migration/index issue:', e.message);
+}
 
 // Create audit logging tables
 db.exec(`
@@ -85,6 +102,7 @@ db.exec(`
     file_path TEXT, -- For file-related actions
     file_phone TEXT, -- Phone from file metadata
     file_email TEXT, -- Email from file metadata
+    call_id TEXT, -- Call ID for file related events
     action_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
     ip_address TEXT,
     user_agent TEXT,
@@ -106,17 +124,34 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_audit_logs_composite ON audit_logs(user_id, action_type, action_timestamp);
 `);
 
+// Migration: ensure call_id column exists on audit_logs and index created after confirmation
+try {
+  const auditCols = db.prepare("PRAGMA table_info(audit_logs)").all();
+  let auditHasCallId = auditCols.some(c => c.name === 'call_id');
+  if (!auditHasCallId) {
+    console.log('⚙️  [MIGRATION] Adding call_id column to audit_logs');
+    db.exec(`ALTER TABLE audit_logs ADD COLUMN call_id TEXT;`);
+    auditHasCallId = true;
+  }
+  if (auditHasCallId) {
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_logs_call_id ON audit_logs(call_id);`);
+  }
+} catch (e) {
+  console.warn('⚠️  [MIGRATION] audit_logs.call_id migration/index issue:', e.message);
+}
+
 // Prepared statements for performance
 const statements = {
   // Insert or update file metadata
   upsertFile: db.prepare(`
-    INSERT INTO files (file_path, phone, email, call_date, call_time, duration_ms, file_size)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO files (file_path, phone, email, call_date, call_time, call_id, duration_ms, file_size)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(file_path) DO UPDATE SET
       phone = excluded.phone,
       email = excluded.email,
       call_date = excluded.call_date,
       call_time = excluded.call_time,
+      call_id = excluded.call_id,
       duration_ms = excluded.duration_ms,
       file_size = excluded.file_size,
       updated_at = CURRENT_TIMESTAMP
@@ -130,6 +165,7 @@ const statements = {
       email,
       call_date,
       call_time,
+      call_id,
       duration_ms,
       file_size
     FROM files
@@ -140,7 +176,8 @@ const statements = {
       AND (? IS NULL OR email LIKE '%' || ? || '%')
       AND (? IS NULL OR duration_ms >= ? * 1000)
       AND (? IS NULL OR call_time >= ?)
-      AND (? IS NULL OR call_time <= ?)
+  AND (? IS NULL OR call_time <= ?)
+  AND (? IS NULL OR call_id LIKE '%' || ? || '%')
     ORDER BY 
       CASE WHEN ? = 'date' AND ? = 'asc' THEN call_date END ASC,
       CASE WHEN ? = 'date' AND ? = 'desc' THEN call_date END DESC,
@@ -152,6 +189,8 @@ const statements = {
       CASE WHEN ? = 'email' AND ? = 'desc' THEN email END DESC,
       CASE WHEN ? = 'durationMs' AND ? = 'asc' THEN duration_ms END ASC,
       CASE WHEN ? = 'durationMs' AND ? = 'desc' THEN duration_ms END DESC,
+       CASE WHEN ? = 'callId' AND ? = 'asc' THEN call_id END ASC,
+       CASE WHEN ? = 'callId' AND ? = 'desc' THEN call_id END DESC,
       call_date DESC, call_time DESC
     LIMIT ? OFFSET ?
   `),
@@ -167,7 +206,8 @@ const statements = {
       AND (? IS NULL OR email LIKE '%' || ? || '%')
       AND (? IS NULL OR duration_ms >= ? * 1000)
       AND (? IS NULL OR call_time >= ?)
-      AND (? IS NULL OR call_time <= ?)
+  AND (? IS NULL OR call_time <= ?)
+  AND (? IS NULL OR call_id LIKE '%' || ? || '%')
   `),
   
   // Check if file exists
@@ -178,6 +218,18 @@ const statements = {
   
   // Get total file count
   getTotalCount: db.prepare('SELECT COUNT(*) as total FROM files'),
+  // Rows needing backfill (missing call_id or zero/NULL duration)
+  getFilesNeedingBackfill: db.prepare(`
+    SELECT file_path FROM files
+    WHERE (call_id IS NULL OR call_id = '')
+       OR (duration_ms IS NULL OR duration_ms = 0)
+    LIMIT ?
+  `),
+  updateFileParsedMeta: db.prepare(`
+    UPDATE files
+    SET call_id = ?, duration_ms = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE file_path = ?
+  `),
   
   // Get files by date range for indexing
   getFilesByDateRange: db.prepare(`
@@ -237,9 +289,9 @@ const statements = {
   `),
   
   createAuditLog: db.prepare(`
-    INSERT INTO audit_logs (user_id, user_email, action_type, file_path, file_phone, file_email, 
+    INSERT INTO audit_logs (user_id, user_email, action_type, file_path, file_phone, file_email, call_id,
                            ip_address, user_agent, session_id, additional_data)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   
   getAuditLogs: db.prepare(`
@@ -248,6 +300,7 @@ const statements = {
       AND (? IS NULL OR action_type = ?)
       AND (? IS NULL OR DATE(action_timestamp) >= ?)
       AND (? IS NULL OR DATE(action_timestamp) <= ?)
+      AND (? IS NULL OR call_id LIKE '%' || ? || '%')
     ORDER BY action_timestamp DESC 
     LIMIT ? OFFSET ?
   `),
@@ -281,6 +334,22 @@ const statements = {
     LIMIT ?
   `)
 };
+
+// Additional maintenance statements for backfilling missing call_id values on audit_logs
+try {
+  statements.getAuditLogsNeedingCallId = db.prepare(`
+    SELECT id, additional_data FROM audit_logs
+    WHERE call_id IS NULL
+      AND additional_data IS NOT NULL
+      AND (additional_data LIKE '%callId%' OR additional_data LIKE '%call_id%')
+    LIMIT ?
+  `);
+  statements.updateAuditLogCallId = db.prepare(`
+    UPDATE audit_logs SET call_id = ? WHERE id = ?
+  `);
+} catch (e) {
+  console.warn('⚠️  [INIT] Failed to prepare audit call_id backfill statements:', e.message);
+}
 
 // Helper function to parse filename and extract metadata
 export function parseFileMetadata(filePath) {
@@ -319,8 +388,32 @@ export function parseFileMetadata(filePath) {
     }
   }
   
-  const durationMatch = filename.match(/_(\d+)\.wav$/);
-  const durationMs = durationMatch ? parseInt(durationMatch[1], 10) : 0;
+  // Precise pattern extraction: expect suffix "@ <HH_MM_SS AM|PM>_<duration>(_<callId>)?.wav"
+  // Example: "@ 11_15_02 AM_2660_300000002997148.wav"
+  let callId = null;
+  let durationMs = 0;
+  try {
+    const suffixRegex = /@ ([0-9_]+ [AP]M)_(\d+)(?:_(\d+))?\.wav$/;
+    const match = filename.match(suffixRegex);
+    if (match) {
+      const rawDuration = match[2];
+      const rawCallId = match[3] || null;
+      if (rawDuration && /^\d+$/.test(rawDuration)) {
+        // Treat duration strictly as milliseconds as per requirement
+        durationMs = parseInt(rawDuration, 10);
+      }
+      if (rawCallId && /^\d+$/.test(rawCallId)) callId = rawCallId;
+    } else {
+      // Fallback: legacy single duration
+      const legacy = filename.match(/@ [0-9_]+ [AP]M_(\d+)\.wav$/);
+      if (legacy) {
+        const d = parseInt(legacy[1], 10);
+        if (!isNaN(d)) durationMs = d;
+      }
+    }
+  } catch (e) {
+    console.warn('Filename tail parse error:', e.message, filename);
+  }
   
   return {
     filePath,
@@ -328,6 +421,7 @@ export function parseFileMetadata(filePath) {
     email,
     callDate,
     callTime,
+    callId,
     durationMs,
     fileSize: 0 // Will be updated when available
   };
@@ -345,6 +439,7 @@ export function indexFile(filePath, fileSize = 0) {
       metadata.email,
       metadata.callDate,
       metadata.callTime,
+      metadata.callId || null,
       metadata.durationMs,
       fileSize
     );
@@ -353,6 +448,58 @@ export function indexFile(filePath, fileSize = 0) {
     console.error('Error indexing file:', filePath, error);
     return false;
   }
+}
+
+// Backfill any existing file rows missing call_id or duration_ms using current parsing logic
+export function backfillFileMetadata(batchSize = 500) {
+  let processed = 0;
+  let updated = 0;
+  for (;;) {
+    const rows = statements.getFilesNeedingBackfill.all(batchSize);
+    if (!rows.length) break;
+    for (const row of rows) {
+      processed++;
+      const meta = parseFileMetadata(row.file_path);
+      if (!meta) continue;
+      try {
+        statements.updateFileParsedMeta.run(meta.callId || null, meta.durationMs || 0, row.file_path);
+        updated++;
+      } catch (e) {
+        console.warn('Backfill update failed for', row.file_path, e.message);
+      }
+    }
+    if (rows.length < batchSize) break; // no more
+  }
+  return { processed, updated };
+}
+
+// Backfill audit_logs.call_id from additional_data JSON where missing
+export function backfillAuditLogCallIds(batchSize = 500) {
+  if (!statements.getAuditLogsNeedingCallId) {
+    return { processed: 0, updated: 0, error: 'Statement not prepared' };
+  }
+  let processed = 0;
+  let updated = 0;
+  for (;;) {
+    const rows = statements.getAuditLogsNeedingCallId.all(batchSize);
+    if (!rows.length) break;
+    for (const row of rows) {
+      processed++;
+      if (!row.additional_data) continue;
+      try {
+        const meta = JSON.parse(row.additional_data);
+        const candidate = meta.callId || meta.call_id || null;
+        if (candidate && /^\d+$/.test(String(candidate))) {
+          statements.updateAuditLogCallId.run(String(candidate), row.id);
+          updated++;
+        }
+      } catch (e) {
+        // ignore JSON parse errors
+      }
+    }
+    if (rows.length < batchSize) break;
+  }
+  return { processed, updated };
 }
 
 // Batch index multiple files (for initial indexing)
@@ -383,6 +530,7 @@ export function queryFiles(filters = {}) {
     durationMin,
     timeStart,
     timeEnd,
+    callId,
     sortColumn = 'date',
     sortDirection = 'desc',
     limit = 25,
@@ -402,6 +550,7 @@ export function queryFiles(filters = {}) {
     durationMin, durationMin, // duration filter (2 params)
     timeStart, timeStart,  // timeStart filter (2 params)
     timeEnd, timeEnd,      // timeEnd filter (2 params)
+    callId, callId,        // call_id equality (2 params)
     // Sorting parameters (multiple for different combinations)
     sortColumn, sortDirection, // date sort
     sortColumn, sortDirection, // date sort desc
@@ -413,6 +562,8 @@ export function queryFiles(filters = {}) {
     sortColumn, sortDirection, // email sort desc
     sortColumn, sortDirection, // duration sort
     sortColumn, sortDirection, // duration sort desc
+    sortColumn, sortDirection, // callId sort asc
+    sortColumn, sortDirection, // callId sort desc
     limit, offset
   ];
   
@@ -426,13 +577,23 @@ export function queryFiles(filters = {}) {
     email, email,
     durationMin, durationMin,
     timeStart, timeStart,
-    timeEnd, timeEnd
+    timeEnd, timeEnd,
+    callId, callId
   ];
   
   const { total } = statements.countFiles.get(...countParams);
   
   return {
-    files,
+    files: files.map(f => ({
+      file_path: f.file_path,
+      phone: f.phone,
+      email: f.email,
+      call_date: f.call_date,
+      call_time: f.call_time,
+      call_id: f.call_id || null,
+      duration_ms: f.duration_ms,
+      file_size: f.file_size
+    })),
     totalCount: total,
     hasMore: offset + limit < total
   };
@@ -521,17 +682,19 @@ export function logAuditEvent(userId, userEmail, actionType, filePath = null, fi
     const filePhone = fileMetadata?.phone || null;
     const fileEmail = fileMetadata?.email || null;
     const additionalDataStr = additionalData ? JSON.stringify(additionalData) : null;
+    const callId = fileMetadata?.callId || fileMetadata?.call_id || additionalData?.callId || null;
     
     statements.createAuditLog.run(
-      userId, 
-      userEmail, 
-      actionType, 
-      filePath, 
-      filePhone, 
-      fileEmail, 
-      ipAddress, 
-      userAgent, 
-      sessionId, 
+      userId,
+      userEmail,
+      actionType,
+      filePath,
+      filePhone,
+      fileEmail,
+      callId,
+      ipAddress,
+      userAgent,
+      sessionId,
       additionalDataStr
     );
     
@@ -541,13 +704,14 @@ export function logAuditEvent(userId, userEmail, actionType, filePath = null, fi
   }
 }
 
-export function getAuditLogs(userId = null, actionType = null, startDate = null, endDate = null, limit = 100, offset = 0) {
+export function getAuditLogs(userId = null, actionType = null, startDate = null, endDate = null, callId = null, limit = 100, offset = 0) {
   try {
     return statements.getAuditLogs.all(
       userId, userId,
       actionType, actionType,
       startDate, startDate,
       endDate, endDate,
+      callId, callId,
       limit, offset
     );
   } catch (error) {

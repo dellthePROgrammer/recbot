@@ -44,20 +44,18 @@ import { DatePicker } from "@mui/x-date-pickers/DatePicker";
 import { TimePicker } from "@mui/x-date-pickers/TimePicker";
 import dayjs from "dayjs";
 
-function parseFileInfo(file) {
-  const cleanFile = file.startsWith('recordings/') ? file.slice('recordings/'.length) : file;
-  const [folder, filename] = cleanFile.split('/');
-  if (!folder || !filename) return { file, date: '', phone: '', email: '', time: '', durationMs: 0 };
-  const date = folder.replace(/_/g, '/');
-  const phoneMatch = filename.match(/^(\d+)/);
-  const phone = phoneMatch ? phoneMatch[1] : '';
-  const emailMatch = filename.match(/by ([^@]+@[^ ]+)/);
-  const email = emailMatch ? emailMatch[1] : '';
-  const timeMatch = filename.match(/@ ([\d_]+ [AP]M)/);
-  const time = timeMatch ? timeMatch[1].replace(/_/g, ':') : '';
-  const durationMatch = filename.match(/_(\d+)\.wav$/);
-  const durationMs = durationMatch ? parseInt(durationMatch[1], 10) : 0;
-  return { file, date, phone, email, time, durationMs };
+// Backend now returns structured file objects; this is a passthrough mapper for safety/future
+function normalizeFile(rec) {
+  return {
+    file: rec.path,
+    date: rec.date?.replace(/-/g, '/') || '',
+    phone: rec.phone || '',
+    email: rec.email || '',
+    time: rec.time || '',
+    callId: rec.callId || '',
+    durationMs: rec.durationMs || 0,
+    size: rec.size || 0
+  };
 }
 
 function formatDuration(ms) {
@@ -89,8 +87,10 @@ function FileViewer({ darkMode }) {
   const [sortColumn, setSortColumn] = useState("date");
   const [sortDirection, setSortDirection] = useState("asc");
   const [durationMin, setDurationMin] = useState("");
-  const [durationMode, setDurationMode] = useState("min");
+  // Removed durationMode; durationMin now always interpreted as minutes
   const [timeMode, setTimeMode] = useState("range");
+  const [callIdFilter, setCallIdFilter] = useState("");
+  const callIdDebounceRef = React.useRef(null);
   const [error500, setError500] = useState(false);
   const [loading, setLoading] = useState(false);
   const [filesPerPage, setFilesPerPage] = useState(25);
@@ -120,13 +120,14 @@ function FileViewer({ darkMode }) {
       ? (customEmailFilter !== null ? customEmailFilter : emailFilter)
       : userEmail; // Only members are restricted to their own files
     
-    url += `&offset=${offset}&limit=${limit}`;
+  url += `&offset=${offset}&limit=${limit}`;
+  if (callIdFilter) url += `&callId=${encodeURIComponent(callIdFilter.trim())}`;
     url += `&sortBy=${customSortColumn || sortColumn}&sortOrder=${customSortDirection || sortDirection}`;
     
     if (customDurationMin !== null && customDurationMin !== "") {
-      url += `&durationMin=${encodeURIComponent(customDurationMin)}&durationMode=${durationMode}`;
+      url += `&durationMin=${encodeURIComponent(customDurationMin)}`;
     } else if (durationMin !== "") {
-      url += `&durationMin=${encodeURIComponent(durationMin)}&durationMode=${durationMode}`;
+      url += `&durationMin=${encodeURIComponent(durationMin)}`;
     }
     
     if (customPhoneFilter !== null && customPhoneFilter !== "") {
@@ -165,7 +166,7 @@ function FileViewer({ darkMode }) {
         return res.json();
       })
       .then((data) => {
-        setFiles(data.files.map(parseFileInfo));
+        setFiles((data.files || []).map(normalizeFile));
         setTotalCount(data.totalCount);
         setHasMore(data.hasMore);
         setCurrentOffset(offset);
@@ -181,6 +182,19 @@ function FileViewer({ darkMode }) {
     const newOffset = reset ? 0 : currentOffset;
     fetchFiles(calendarDateStart, calendarDateEnd, newOffset);
   };
+
+  // Debounced fetch when callIdFilter changes (consistent auto behavior)
+  useEffect(() => {
+    if (!calendarDateStart) return; // need a start date selected
+    if (callIdDebounceRef.current) clearTimeout(callIdDebounceRef.current);
+    callIdDebounceRef.current = setTimeout(() => {
+      // Only trigger automatically when empty or at least 2 chars (reduce noise)
+      if (callIdFilter.trim() === '' || callIdFilter.trim().length >= 2) {
+        refreshFiles(true);
+      }
+    }, 350);
+    return () => clearTimeout(callIdDebounceRef.current);
+  }, [callIdFilter]);
 
   const handleSort = (column) => {
     const isAsc = sortColumn === column && sortDirection === "asc";
@@ -1028,6 +1042,20 @@ function FileViewer({ darkMode }) {
             <TextField
               fullWidth
               size="small"
+              label="Call ID"
+              value={callIdFilter}
+              onChange={(e) => setCallIdFilter(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') refreshFiles(true); }}
+              InputProps={{
+                startAdornment: <InputAdornment position="start">🆔</InputAdornment>,
+              }}
+              helperText={callIdFilter ? 'Substring match (2+ chars auto)' : 'Enter 2+ chars for auto filter'}
+            />
+          </Grid>
+          <Grid item xs={12} md={3}>
+            <TextField
+              fullWidth
+              size="small"
               label="Email"
               value={(isAdmin || userRole === undefined) ? emailFilter : userEmail}
               onChange={(e) => (isAdmin || userRole === undefined) && setEmailFilter(e.target.value)}
@@ -1049,16 +1077,27 @@ function FileViewer({ darkMode }) {
               }}
             />
           </Grid>
-          <Grid item xs={12} md={2}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Duration Mode</InputLabel>
-              <Select value={durationMode} onChange={(e) => setDurationMode(e.target.value)}>
-                <MenuItem value="min">Minutes</MenuItem>
-                <MenuItem value="sec">Seconds</MenuItem>
-              </Select>
-            </FormControl>
+        </Grid>
+        <Grid container spacing={2} mb={2}>
+          <Grid item xs={6} md={3}>
+            <TimePicker
+              label="Start Time"
+              value={timePickerStart}
+              onChange={setTimePickerStart}
+              disabled={timeMode !== 'range'}
+              slotProps={{ textField: { size: 'small', fullWidth: true } }}
+            />
           </Grid>
-          <Grid item xs={12} md={2}>
+          <Grid item xs={6} md={3}>
+            <TimePicker
+              label="End Time"
+              value={timePickerEnd}
+              onChange={setTimePickerEnd}
+              disabled={timeMode !== 'range'}
+              slotProps={{ textField: { size: 'small', fullWidth: true } }}
+            />
+          </Grid>
+          <Grid item xs={12} md={3} sx={{ display:'flex', alignItems:'center' }}>
             <FormControl fullWidth size="small">
               <InputLabel>Time Filter</InputLabel>
               <Select value={timeMode} onChange={(e) => setTimeMode(e.target.value)}>
@@ -1068,27 +1107,6 @@ function FileViewer({ darkMode }) {
             </FormControl>
           </Grid>
         </Grid>
-
-        {timeMode === "range" && (
-          <Grid container spacing={2} mb={2}>
-            <Grid item xs={6} md={3}>
-              <TimePicker
-                label="Start Time"
-                value={timePickerStart}
-                onChange={setTimePickerStart}
-                slotProps={{ textField: { size: 'small', fullWidth: true } }}
-              />
-            </Grid>
-            <Grid item xs={6} md={3}>
-              <TimePicker
-                label="End Time"
-                value={timePickerEnd}
-                onChange={setTimePickerEnd}
-                slotProps={{ textField: { size: 'small', fullWidth: true } }}
-              />
-            </Grid>
-          </Grid>
-        )}
 
         {/* Results and pagination controls */}
         <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
@@ -1156,6 +1174,15 @@ function FileViewer({ darkMode }) {
                     </TableCell>
                     <TableCell>
                       <TableSortLabel
+                        active={sortColumn === 'callId'}
+                        direction={sortColumn === 'callId' ? sortDirection : 'asc'}
+                        onClick={() => handleSort('callId')}
+                      >
+                        Call ID
+                      </TableSortLabel>
+                    </TableCell>
+                    <TableCell>
+                      <TableSortLabel
                         active={sortColumn === 'phone'}
                         direction={sortColumn === 'phone' ? sortDirection : 'asc'}
                         onClick={() => handleSort('phone')}
@@ -1189,6 +1216,7 @@ function FileViewer({ darkMode }) {
                     <TableRow key={index} hover>
                       <TableCell>{fileInfo.date}</TableCell>
                       <TableCell>{fileInfo.time}</TableCell>
+                      <TableCell>{fileInfo.callId || '-'}</TableCell>
                       <TableCell>{fileInfo.phone}</TableCell>
                       <TableCell>{fileInfo.email}</TableCell>
                       <TableCell>{formatDuration(fileInfo.durationMs)}</TableCell>
