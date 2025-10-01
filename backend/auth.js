@@ -21,7 +21,7 @@ export const clerkAuth = clerkMiddleware({
 // Middleware to ensure user is authenticated and populate user data
 export const requireAuth = async (req, res, next) => {
   try {
-    const auth = getAuth(req);
+  const auth = getAuth(req);
     
     if (!auth?.userId) {
       return res.status(401).json({ error: 'Authentication required' });
@@ -110,7 +110,7 @@ export const requireAuth = async (req, res, next) => {
       });
     }
 
-    // Add user info to request for easier access
+    // Add user info to request for easier access (include Clerk sessionId for potential revocation)
     req.user = {
       id: user.id,
       email: userEmail,
@@ -121,6 +121,7 @@ export const requireAuth = async (req, res, next) => {
       userAgent: userAgent,
       sessionClaims
     };
+    req.clerkSessionId = auth.sessionId || null;
     
     next();
   } catch (error) {

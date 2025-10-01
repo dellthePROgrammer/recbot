@@ -50,6 +50,7 @@ function AdminPage({ darkMode }) {
   // Audit state
   const [auditLogs, setAuditLogs] = useState([]);
   const [userSessions, setUserSessions] = useState([]);
+  const [sessionReasons, setSessionReasons] = useState({}); // Map sessionId -> reason string
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditFilters, setAuditFilters] = useState({
     actionType: '',
@@ -160,6 +161,27 @@ function AdminPage({ darkMode }) {
       });
       const data = await response.json();
       setUserSessions(data.sessions || []);
+      // After loading sessions, fetch related audit logs to derive reasons
+      try {
+        const auditResp = await fetch(`/api/audit-logs?limit=500&actionType=LOGOUT`, {
+          headers: { 'Authorization': `Bearer ${await getToken()}` }
+        });
+        if (auditResp.ok) {
+          const auditData = await auditResp.json();
+            const map = {};
+            (auditData.logs || []).forEach(log => {
+              if (log.session_id && log.additional_data) {
+                try {
+                  const meta = JSON.parse(log.additional_data);
+                  if (meta.reason) map[log.session_id] = meta.reason;
+                } catch {}
+              }
+            });
+            setSessionReasons(map);
+        }
+      } catch (e) {
+        console.warn('Failed to enrich session reasons:', e.message);
+      }
     } catch (error) {
       console.error('Error fetching user sessions:', error);
     }
@@ -430,6 +452,7 @@ function AdminPage({ darkMode }) {
                   <TableCell>Login Time</TableCell>
                   <TableCell>Logout Time</TableCell>
                   <TableCell>Duration</TableCell>
+                  <TableCell>Reason</TableCell>
                   <TableCell>IP Address</TableCell>
                 </TableRow>
               </TableHead>
@@ -444,12 +467,21 @@ function AdminPage({ darkMode }) {
                         `${Math.round(session.session_duration_ms / 1000 / 60)} min` : 
                         'Ongoing'}
                     </TableCell>
+                    <TableCell>
+                      {session.logout_time ? (
+                        sessionReasons[session.id] ? (
+                          <Chip size="small" label={sessionReasons[session.id]} color={sessionReasons[session.id].startsWith('auto') ? 'warning' : 'default'} />
+                        ) : <Chip size="small" label="manual/unknown" variant="outlined" />
+                      ) : (
+                        <Chip size="small" label="active" color="success" />
+                      )}
+                    </TableCell>
                     <TableCell>{session.ip_address || '-'}</TableCell>
                   </TableRow>
                 ))}
                 {userSessions.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={5} align="center">
+                    <TableCell colSpan={6} align="center">
                       No user sessions found. Click "Load User Sessions" to see recent logins.
                     </TableCell>
                   </TableRow>

@@ -55,9 +55,26 @@ db.exec(`
     logout_time DATETIME,
     session_duration_ms INTEGER,
     ip_address TEXT,
-    user_agent TEXT
+    user_agent TEXT,
+    last_activity DATETIME
   );
 `);
+
+// --- Backward compatible migration: add last_activity if missing (older DBs) ---
+try {
+  const cols = db.prepare("PRAGMA table_info(user_sessions)").all();
+  const hasLastActivity = cols.some(c => c.name === 'last_activity');
+  if (!hasLastActivity) {
+    console.log('⚙️  [MIGRATION] Adding last_activity column to user_sessions');
+    db.exec(`ALTER TABLE user_sessions ADD COLUMN last_activity DATETIME;`);
+    // Initialize existing rows to their login_time
+    db.exec(`UPDATE user_sessions SET last_activity = login_time WHERE last_activity IS NULL;`);
+  }
+  // Ensure index for activity lookups
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_user_sessions_last_activity ON user_sessions(last_activity);`);
+} catch (mErr) {
+  console.warn('⚠️  [MIGRATION] last_activity migration issue (safe to ignore if already applied):', mErr.message);
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS audit_logs (
@@ -170,8 +187,8 @@ const statements = {
   
   // Audit logging statements
   createUserSession: db.prepare(`
-    INSERT INTO user_sessions (user_id, user_email, ip_address, user_agent)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO user_sessions (user_id, user_email, ip_address, user_agent, last_activity)
+    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
   `),
   
   updateUserSession: db.prepare(`
@@ -179,6 +196,31 @@ const statements = {
     SET logout_time = CURRENT_TIMESTAMP, 
         session_duration_ms = (strftime('%s', 'now') - strftime('%s', login_time)) * 1000
     WHERE user_id = ? AND logout_time IS NULL
+  `),
+  updateSessionActivity: db.prepare(`
+    UPDATE user_sessions
+    SET last_activity = CURRENT_TIMESTAMP
+    WHERE user_id = ? AND logout_time IS NULL
+  `),
+  getInactiveOpenSessions: db.prepare(`
+    SELECT id, user_id, user_email, login_time, last_activity, ip_address, user_agent
+    FROM user_sessions
+    WHERE logout_time IS NULL
+      AND last_activity IS NOT NULL
+      AND (strftime('%s','now') - strftime('%s', last_activity)) > (? * 60)
+    LIMIT ?
+  `),
+  getAllOpenSessions: db.prepare(`
+    SELECT id, user_id, user_email, login_time, last_activity
+    FROM user_sessions
+    WHERE logout_time IS NULL
+    ORDER BY user_id, datetime(login_time) ASC, id ASC
+  `),
+  closeSessionById: db.prepare(`
+    UPDATE user_sessions
+    SET logout_time = ?,
+        session_duration_ms = (strftime('%s', ?) - strftime('%s', login_time)) * 1000
+    WHERE id = ? AND logout_time IS NULL
   `),
   forceExpireSessionById: db.prepare(`
     UPDATE user_sessions
@@ -451,6 +493,14 @@ export function logUserLogout(userId) {
   }
 }
 
+export function touchUserSession(userId) {
+  try {
+    statements.updateSessionActivity.run(userId);
+  } catch (error) {
+    console.error('Error updating session activity:', error);
+  }
+}
+
 export function expireStaleSessions(maxHours = 4, batchLimit = 100) {
   try {
     const rows = statements.getExpiredOpenSessions.all(maxHours, batchLimit);
@@ -527,6 +577,91 @@ export function getLastLogin(userId) {
   } catch (error) {
     console.error('Error getting last login:', error);
     return null;
+  }
+}
+
+export function expireInactiveSessions(maxInactivityMinutes = 30, batchLimit = 200) {
+  try {
+    const rows = statements.getInactiveOpenSessions.all(maxInactivityMinutes, batchLimit);
+    if (!rows.length) return 0;
+    for (const row of rows) {
+      statements.forceExpireSessionById?.run?.(row.id); // reuse if added earlier; fallback to updateUserSession logic per user
+      if (!statements.forceExpireSessionById) {
+        // fallback closes all open sessions for that user
+        statements.updateUserSession.run(row.user_id);
+      }
+    }
+    return rows;
+  } catch (e) {
+    console.error('Error expiring inactive sessions:', e);
+    return 0;
+  }
+}
+
+export function repairOpenSessions({ keepLatestOpen = true } = {}) {
+  try {
+    const open = statements.getAllOpenSessions.all();
+    if (!open.length) return { usersAffected: 0, sessionsClosed: 0, details: [] };
+    const byUser = new Map();
+    open.forEach(s => {
+      if (!byUser.has(s.user_id)) byUser.set(s.user_id, []);
+      byUser.get(s.user_id).push(s);
+    });
+    const details = [];
+    let sessionsClosed = 0;
+    for (const [userId, sessions] of byUser.entries()) {
+      if (sessions.length <= 1) continue;
+      // sessions are already sorted by login_time ASC
+      for (let i = 0; i < sessions.length; i++) {
+        const sess = sessions[i];
+        const next = sessions[i + 1];
+        const isLast = i === sessions.length - 1;
+        if (isLast && keepLatestOpen) continue; // keep the most recent session open
+        let logoutTime = next ? next.login_time : new Date().toISOString();
+        // Ensure logoutTime > login_time
+        if (new Date(logoutTime).getTime() <= new Date(sess.login_time).getTime()) {
+          logoutTime = new Date(new Date(sess.login_time).getTime() + 1000).toISOString();
+        }
+        statements.closeSessionById.run(logoutTime, logoutTime, sess.id);
+        sessionsClosed++;
+        details.push({ sessionId: sess.id, userId, closedAt: logoutTime, login_time: sess.login_time });
+      }
+    }
+    return { usersAffected: details.reduce((acc, d) => acc.add(d.userId), new Set()).size, sessionsClosed, details };
+  } catch (e) {
+    console.error('Error repairing sessions:', e);
+    return { usersAffected: 0, sessionsClosed: 0, details: [], error: e.message };
+  }
+}
+
+// Retroactively close any open sessions whose age exceeds maxHours, synthesizing a realistic logout_time
+// Instead of marking logout_time as NOW (which would create inflated durations), we set logout_time = login_time + maxHours.
+// Returns { closed: number, details: [] }
+export function backfillExpiredOpenSessions(maxHours = 4) {
+  try {
+    // Reuse existing query logic to find expired sessions (but we need all, not limited artificially)
+    // We'll craft a direct query to avoid the LIMIT in prepared statement getExpiredOpenSessions
+    const rows = db.prepare(`
+      SELECT id, user_id, user_email, login_time
+      FROM user_sessions
+      WHERE logout_time IS NULL
+        AND (strftime('%s','now') - strftime('%s', login_time)) > (? * 3600)
+      ORDER BY datetime(login_time) ASC
+    `).all(maxHours);
+    if (!rows.length) return { closed: 0, details: [] };
+    const details = [];
+    for (const row of rows) {
+      const syntheticLogout = new Date(new Date(row.login_time).getTime() + maxHours * 3600 * 1000).toISOString();
+      // Ensure synthetic logout does not exceed now (in case clock skew)
+      const nowIso = new Date().toISOString();
+      const finalLogout = syntheticLogout > nowIso ? nowIso : syntheticLogout;
+      statements.closeSessionById.run(finalLogout, finalLogout, row.id);
+      details.push({ sessionId: row.id, userId: row.user_id, login_time: row.login_time, logout_time: finalLogout });
+    }
+    return { closed: details.length, details };
+  } catch (e) {
+    console.error('Error backfilling expired open sessions:', e);
+    return { closed: 0, details: [], error: e.message };
   }
 }
 

@@ -15,7 +15,7 @@ import {
   PutObjectCommand,
   HeadObjectCommand
 } from "@aws-sdk/client-s3";
-import { queryFiles, indexFiles, indexFile, getDatabaseStats, getAuditLogs, getUserSessions, logAuditEvent, parseFileMetadata, logUserLogout, logUserSession, getDistinctUsers, expireStaleSessions } from './database.js';
+import { queryFiles, indexFiles, indexFile, getDatabaseStats, getAuditLogs, getUserSessions, logAuditEvent, parseFileMetadata, logUserLogout, logUserSession, getDistinctUsers, expireStaleSessions, touchUserSession, expireInactiveSessions, repairOpenSessions, backfillExpiredOpenSessions } from './database.js';
 import { clerkAuth, requireAuth, requireAdmin, requireMemberOrAdmin, requireAuthenticatedUser, requireManagerOrAdmin } from './auth.js';
 
 dayjs.extend(customParseFormat);
@@ -71,7 +71,8 @@ app.use(async (req, res, next) => {
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 
 // --- AUTO SESSION EXPIRATION (4h) ---
-const MAX_SESSION_HOURS = parseInt(process.env.MAX_SESSION_HOURS || '1');
+const MAX_SESSION_HOURS = parseInt(process.env.MAX_SESSION_HOURS || '4');
+const MAX_INACTIVITY_MINUTES = parseInt(process.env.MAX_INACTIVITY_MINUTES || '30');
 // Run every 5 minutes to catch stale sessions
 setInterval(() => {
   try {
@@ -83,13 +84,30 @@ setInterval(() => {
         logAuditEvent(
           row.user_id,
           row.user_email,
-          'LOGOUT_AUTO',
+          'LOGOUT',
           null,
           null,
           row.ip_address || null,
           row.user_agent || null,
           row.id,
-          { reason: 'max_session_duration_exceeded', maxHours: MAX_SESSION_HOURS, login_time: row.login_time }
+          { reason: 'auto_expire_interval', maxHours: MAX_SESSION_HOURS, login_time: row.login_time }
+        );
+      }
+    }
+    const inactive = expireInactiveSessions(MAX_INACTIVITY_MINUTES, 300);
+    if (Array.isArray(inactive) && inactive.length) {
+      console.log(`💤 [INACTIVITY EXPIRY] Auto-logged out ${inactive.length} inactive session(s) > ${MAX_INACTIVITY_MINUTES}m`);
+      for (const row of inactive) {
+        logAuditEvent(
+          row.user_id,
+          row.user_email,
+          'LOGOUT',
+          null,
+          null,
+          row.ip_address || null,
+          row.user_agent || null,
+          row.id,
+          { reason: 'auto_inactive', minutes: MAX_INACTIVITY_MINUTES, last_activity: row.last_activity, login_time: row.login_time }
         );
       }
     }
@@ -107,18 +125,100 @@ app.get('/api/config', (req, res) => {
 
 // Logout endpoint to track user logout events
 // Middleware to ensure session row exists after requireAuth sets req.user
-function ensureSession(req, res, next) {
+async function ensureSession(req, res, next) {
   try {
     if (!req.user) return next();
     // Quick check: if last login was within 10 seconds but no session row created (edge), we can create
     // Simpler: attempt to create a session only if no open session exists (logout_time is NULL)
     // We'll query DB minimally.
-    const openSession = getUserSessions(req.user.id, null, null, 1, 0).find(s => !s.logout_time);
-    if (!openSession) {
-      const sessionId = logUserSession(req.user.id, req.user.email, req.user.ipAddress, req.user.userAgent);
-      req.currentSessionId = sessionId;
+    const now = Date.now();
+    const maxHours = parseInt(process.env.MAX_SESSION_HOURS || '4');
+    const maxMs = maxHours * 3600 * 1000;
+    const openSession = getUserSessions(req.user.id, null, null, 3, 0).find(s => !s.logout_time);
+    if (openSession) {
+      const started = new Date(openSession.login_time).getTime();
+      const ageMs = now - started;
+      const MAX_ACTIVE_WINDOW_MIN = parseInt(process.env.MAX_ACTIVE_WINDOW_MIN || '30');
+      let idleMinutes = null;
+      if (openSession.last_activity) {
+        const lastActivityMs = new Date(openSession.last_activity).getTime();
+        idleMinutes = (now - lastActivityMs) / 60000;
+      }
+      if (ageMs > maxMs) {
+        // Age exceeds max session hours threshold.
+        // If user was idle (no activity within last MAX_ACTIVE_WINDOW_MIN) -> hard logout & 401.
+        // If there WAS activity (idleMinutes <= threshold) -> silent rotate session (close + new) so user continues seamlessly.
+        const idleExceeded = idleMinutes === null || idleMinutes > MAX_ACTIVE_WINDOW_MIN;
+        if (idleExceeded) {
+          try {
+            // Hard logout path
+            logUserLogout(req.user.id);
+            logAuditEvent(
+              req.user.id,
+              req.user.email,
+              'LOGOUT',
+              null,
+              null,
+              req.user.ipAddress,
+              req.user.userAgent,
+              openSession.id,
+              { reason: 'auto_expire_idle_hard', maxHours, idleMinutes, maxIdleMinutes: MAX_ACTIVE_WINDOW_MIN, login_time: openSession.login_time }
+            );
+          } catch (e) {
+            console.error('Error logging hard logout:', e);
+          }
+          return res.status(401).json({ error: 'Session expired due to inactivity threshold at renewal point' });
+        } else {
+          // Silent rotation path
+            try {
+              logUserLogout(req.user.id);
+              logAuditEvent(
+                req.user.id,
+                req.user.email,
+                'LOGOUT',
+                null,
+                null,
+                req.user.ipAddress,
+                req.user.userAgent,
+                openSession.id,
+                { reason: 'auto_expire_rotate', maxHours, idleMinutes, maxIdleMinutes: MAX_ACTIVE_WINDOW_MIN, login_time: openSession.login_time }
+              );
+              const newSessionId = logUserSession(req.user.id, req.user.email, req.user.ipAddress, req.user.userAgent);
+              logAuditEvent(
+                req.user.id,
+                req.user.email,
+                'LOGIN',
+                null,
+                null,
+                req.user.ipAddress,
+                req.user.userAgent,
+                newSessionId,
+                { reason: 'rotated_session_after_active_expiry', previousSessionId: openSession.id }
+              );
+              req.currentSessionId = newSessionId;
+              return next();
+            } catch (e) {
+              console.error('Error rotating session:', e);
+            }
+        }
+      }
+  // Touch activity timestamp for active session
+  touchUserSession(req.user.id);
+  req.currentSessionId = openSession.id;
     } else {
-      req.currentSessionId = openSession.id;
+      const sessionId = logUserSession(req.user.id, req.user.email, req.user.ipAddress, req.user.userAgent);
+      logAuditEvent(
+        req.user.id,
+        req.user.email,
+        'LOGIN',
+        null,
+        null,
+        req.user.ipAddress,
+        req.user.userAgent,
+        sessionId,
+        { reason: 'ensure_session_create' }
+      );
+      req.currentSessionId = sessionId;
     }
   } catch (e) {
     console.error('ensureSession error:', e);
@@ -873,6 +973,53 @@ app.get('/api/user-sessions', requireAuth, ensureSession, requireAdmin, (req, re
   } catch (err) {
     console.error('Error getting user sessions:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Session repair & backfill endpoint - admin only
+app.post('/api/repair-sessions', requireAuth, ensureSession, requireAdmin, (req, res) => {
+  try {
+    const { simulate = false, keepLatestOpen = true, maxHours = 4, includeBackfill = true } = req.body || {};
+    const repairPreview = repairOpenSessions({ keepLatestOpen });
+    let backfillResult = { closed: 0, details: [] };
+    if (includeBackfill) {
+      backfillResult = backfillExpiredOpenSessions(maxHours);
+    }
+    if (!simulate) {
+      // Log maintenance audit event summarizing actions (no specific file)
+      logAuditEvent(
+        req.user.id,
+        req.user.email,
+        'MAINTENANCE',
+        null,
+        null,
+        req.user.ipAddress,
+        req.user.userAgent,
+        req.currentSessionId || null,
+        {
+          maintenance: 'repair_sessions',
+          keepLatestOpen,
+          maxHours,
+          includeBackfill,
+          sessionsClosed: repairPreview.sessionsClosed + backfillResult.closed,
+          duplicateClosed: repairPreview.sessionsClosed,
+          expiredBackfilled: backfillResult.closed,
+          usersAffected: repairPreview.usersAffected
+        }
+      );
+    }
+    res.json({
+      simulate: !!simulate,
+      keepLatestOpen,
+      maxHours,
+      includeBackfill,
+      duplicateRepair: repairPreview,
+      expiredBackfill: backfillResult,
+      totalClosed: repairPreview.sessionsClosed + backfillResult.closed
+    });
+  } catch (e) {
+    console.error('Error repairing sessions:', e);
+    res.status(500).json({ error: e.message });
   }
 });
 
