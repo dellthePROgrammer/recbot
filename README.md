@@ -1,8 +1,8 @@
-# RecBot - Audio Recording Management System
+# RecBot - Audio Recording Management & Audit Platform
 
-**Version: v1.1.0**
+**Version: v1.5.x (current dev branch)**
 
-RecBot is a comprehensive web-based audio recording management system designed to browse, filter, search, and play telephony recordings stored in cloud storage. It provides a modern, responsive interface for managing large datasets of audio files with advanced filtering and pagination capabilities.
+RecBot is a production-focused web platform for browsing, filtering, auditing, and playing large volumes of telephony call recordings stored in cloud object storage. It includes structured metadata extraction (duration, call ID), session tracking, full audit logging, and performance‑oriented server‑side querying.
 
 ## Features
 
@@ -31,38 +31,42 @@ RecBot is a comprehensive web-based audio recording management system designed t
 - **Material UI**: Modern, accessible interface components
 - **Loading States**: Visual feedback during data loading
 
-### 🔐 Authentication
-- **Microsoft OAuth**: Secure login with Microsoft accounts
-- **BetterAuth Integration**: Modern authentication framework
-- **Session Management**: Secure session handling
+### 🔐 Authentication & Authorization
+- **Clerk Authentication**: Email/domain restricted sign‑in (e.g. only approved company domain)
+- **Role-Based Access**: Admin, manager, member tiers (download & admin visibility controlled)
+- **Session Lifecycle**: Automatic inactivity timeout & hard session expiration with rotation
+- **Secure Playback & Download Logging**: Each access event audited with IP & session linkage
 
-### ☁️ Cloud Storage
-- **AWS S3 Support**: Store and retrieve files from Amazon S3
-- **Backblaze B2 Support**: Alternative cloud storage option
-- **S3FS Mounting**: Files accessible as local filesystem
-- **SFTP Access**: Optional SFTP server for file access
+### ☁️ Cloud & Storage
+- **AWS S3**: Primary storage & streaming source
+- **On-Demand Transcoding**: FFmpeg WAV normalization (caching layer possible)
+- (Legacy references to B2/SFTP removed for current deployment scope)
 
 ## Architecture
 
-### Backend (Node.js/Express)
-- **Port**: 4000
-- **Database**: SQLite with BetterAuth
-- **Audio Processing**: FFmpeg for format conversion
-- **Cloud APIs**: AWS SDK v3, Rclone for B2
+### Backend (Node.js / Express)
+- **Port**: 4000 (served behind reverse proxy / container)
+- **Database**: SQLite (better-sqlite3) with on‑startup adaptive migrations
+- **Audio Processing**: FFmpeg for transcoding & stream trimming (Range support)
+- **Object Storage**: AWS S3 via AWS SDK v3
+- **Auth Middleware**: Clerk + custom role guards
+- **Session Engine**: user_sessions table + inactivity & duration expirers
+- **Audit Layer**: audit_logs table (LOGIN, LOGOUT with reasons, VIEW_FILES, PLAY_FILE, DOWNLOAD_FILE, MAINTENANCE)
 
 ### Frontend (React)
-- **Framework**: React 18 with Material UI
-- **Date Handling**: Day.js with timezone support
-- **HTTP Client**: Fetch API with error handling
-- **State Management**: React hooks
+- **React 18 + Material UI**: Responsive data & admin dashboards
+- **Filtering UX**: Debounced substring filters (phone, email, callId)
+- **Call ID Highlighting**: Partial match highlighting in audit logs
+- **Clerk Frontend SDK**: Auth gating & role awareness
+- **Session / Audit Visibility**: Admin panel for real‑time log & session review
 
 ### Infrastructure
-- **Containerization**: Docker with multi-stage builds
-- **Reverse Proxy**: Traefik with SSL termination
-- **CDN**: Cloudflare integration
-- **Orchestration**: Docker Compose
+- **Containerization**: Docker multi‑stage image
+- **Reverse Proxy**: (Traefik / Nginx compatible)
+- **Environment Driven Config**: Minimal required variables
+- **Optional CDN**: Cloud distribution of audio objects (not required to run)
 
-## Installation
+## Installation / Deployment
 
 ### Prerequisites
 - Docker and Docker Compose
@@ -93,13 +97,11 @@ ENABLE_SFTP=true
 SFTP_USER=your_sftp_username
 SFTP_PASS=your_sftp_password
 
-# Authentication
-BETTER_AUTH_SECRET=your-secret-key-here
-BETTER_AUTH_URL=https://your-domain.com
-
-# Microsoft OAuth
-MICROSOFT_CLIENT_ID=your_microsoft_client_id
-MICROSOFT_CLIENT_SECRET=your_microsoft_client_secret
+CLERK_PUBLISHABLE_KEY=your_clerk_publishable_key
+CLERK_SECRET_KEY=your_clerk_secret_key
+ALLOWED_EMAIL_DOMAIN=yourcompany.com
+MAX_SESSION_HOURS=4
+MAX_INACTIVITY_MINUTES=30
 
 # File Storage
 WAV_DIR=/data/wav
@@ -125,7 +127,7 @@ WAV_DIR=/data/wav
    ```
 
 4. **Access the application**:
-   - Frontend: http://localhost:3000
+   - Frontend: http://localhost:3000 (or served statically by backend build path)
    - Backend API: http://localhost:4000
 
 ### Production Docker Hub Image
@@ -136,7 +138,7 @@ Use the pre-built image from Docker Hub:
 version: '3.8'
 services:
   recbot:
-    image: ghostreaper69/recbot:v1.1.0
+   image: ghostreaper69/recbot:v1.5.23
     # or use: ghostreaper69/recbot:latest
     ports:
       - "4000:4000"
@@ -153,9 +155,9 @@ services:
 
 ## Usage
 
-### File Organization
+### File & Metadata Model
 
-RecBot expects files to be organized in the following structure:
+Recordings organized by date folders (M_D_YYYY):
 ```
 recordings/
 ├── 9_26_2025/
@@ -166,11 +168,20 @@ recordings/
 │   └── ...
 ```
 
-**Filename Format**: `{phone_number} by {email} @ {time}_{duration_ms}.wav`
-- Phone number: Caller's phone number
-- Email: Agent's email address  
-- Time: Call time in `H_MM_SS AM/PM` format
-- Duration: Call duration in milliseconds
+**Primary Filename Formats**:
+
+1. Legacy: `{phone} by {email} @ {H_MM_SS AM|PM}_{duration_ms}.wav`
+2. New (with callId): `{phone} by {email} @ {H_MM_SS AM|PM}_{duration_ms}_{callId}.wav`
+
+Parsed Fields:
+- phone
+- email
+- call_date (derived from folder)
+- call_time (normalized HH:MM:SS 24h)
+- duration_ms
+- call_id (optional legacy absence)
+
+Backfill routines populate missing `call_id` and `duration_ms` where recoverable.
 
 ### API Endpoints
 
@@ -179,17 +190,15 @@ recordings/
 GET /api/wav-files?dateStart=9_26_2025&dateEnd=9_27_2025&offset=0&limit=25
 ```
 
-**Parameters**:
-- `dateStart`, `dateEnd`: Date range in M_D_YYYY format
-- `offset`, `limit`: Pagination parameters
-- `phone`: Filter by phone number (partial match)
-- `email`: Filter by email (partial match)
-- `durationMin`: Minimum duration in seconds
-- `durationMode`: "min" or "max"
-- `timeStart`, `timeEnd`: Time range in "hh:mm:ss A" format
-- `timeMode`: "range", "Older", or "Newer"
-- `sortColumn`: "date", "time", "phone", "email", "durationMs"
-- `sortDirection`: "asc" or "desc"
+Key Query Parameters (files):
+- dateStart, dateEnd (M_D_YYYY)
+- offset, limit
+- phone, email (substring match)
+- callId (substring match)
+- durationMin (minimum duration in seconds)
+- timeStart, timeEnd (if timeMode=range)
+- sortColumn: date | time | phone | email | durationMs | callId
+- sortDirection: asc | desc
 
 #### Stream Audio
 ```http
@@ -198,20 +207,12 @@ GET /api/wav-files/recordings/9_26_2025/filename.wav
 
 Supports HTTP Range requests for audio seeking.
 
-### Authentication Setup
+### Authentication Setup (Clerk)
 
-1. **Register Microsoft App**:
-   - Go to Azure Portal > App Registrations
-   - Create new application
-   - Add redirect URI: `https://your-domain.com/api/auth/callback/microsoft`
-   - Note Client ID and create Client Secret
-
-2. **Configure Environment**:
-   ```env
-   MICROSOFT_CLIENT_ID=your_client_id
-   MICROSOFT_CLIENT_SECRET=your_client_secret
-   BETTER_AUTH_URL=https://your-domain.com
-   ```
+1. Create a Clerk application → obtain Publishable & Secret keys.
+2. Configure allowed email domain restriction (or enforce in middleware with ALLOWED_EMAIL_DOMAIN).
+3. Add keys to environment (.env or container env vars).
+4. Deploy – frontend uses Clerk React SDK; backend validates JWT / session via Clerk middleware.
 
 ## Development
 
@@ -242,19 +243,19 @@ docker build -t ghostreaper69/recbot:v1.1.0 .
 docker push ghostreaper69/recbot:v1.1.0
 ```
 
-## Performance
+## Performance & Scaling
 
 ### Optimizations
-- **Backend Filtering**: All filtering and sorting happens server-side
-- **Offset Pagination**: Efficient pagination for datasets with 10,000+ files
-- **S3 Caching**: Transcoded audio files cached in S3
-- **Lazy Loading**: Files loaded only when date range is selected
+- Server-side filtering & ordering via indexed SQLite queries
+- Partial LIKE matching (phone, email, callId) with pragmatic indexes
+- Session pruning tasks prevent table bloat
+- Optional caching layer for transcoded outputs (future optimization)
 
 ### Scaling Considerations
-- Backend handles up to 10,000+ files efficiently
-- Pagination prevents frontend memory issues
-- S3 API calls scale better than filesystem operations
-- Consider CDN for audio file delivery in high-traffic scenarios
+- Designed for hundreds of thousands of rows (WAL mode, tuned pragmas advisable)
+- Add covering indexes if new heavy filters introduced
+- Potential future move: shard or externalize to Postgres when concurrency demands it
+- CDN or signed URLs for global latency reduction if required
 
 ## Troubleshooting
 
@@ -266,9 +267,8 @@ docker push ghostreaper69/recbot:v1.1.0
 - Check Docker container logs: `docker-compose logs recbot`
 
 **Authentication not working**:
-- Verify Microsoft OAuth configuration
-- Check redirect URIs match exactly
-- Ensure BETTER_AUTH_URL is accessible
+- Verify Clerk keys & domain restrictions
+- Confirm frontend and backend share the same Clerk environment settings
 
 **Audio not playing**:
 - Check FFmpeg installation in container
@@ -306,21 +306,21 @@ For issues and questions:
 
 ## Changelog
 
-### v1.1.0
-- ✅ Backend pagination and filtering for performance
-- ✅ Advanced sorting by all columns
-- ✅ Immediate filter updates (fixed async state issues)
-- ✅ Enhanced files per page options (up to 1000)
-- ✅ Improved error handling and loading states
-- ✅ Docker Hub image publishing
+### Recent Highlights (v1.5.x series)
+- Call ID extraction & backfill
+- Substring filtering for audit & file callId
+- Admin session & audit dashboards
+- Inactivity + auto-expire session logic
+- Consolidated playback/download audit entries
+- IP resolution behind proxy (Cloudflare / Traefik)
+- Backfill endpoints (sessions & file metadata)
 
-### v1.0.x
-- Initial release with basic functionality
-- S3 and B2 storage support
-- Microsoft authentication
-- Audio streaming with transcoding
-- Basic filtering and search
+### Earlier Milestones
+- Initial pagination & sorting foundation
+- Filename parsing & duration capture
+- Role-based access control
+- Core audio streaming + range seeking
 
 ---
 
-**Built with ❤️ for efficient audio recording management**
+**Built for operational clarity, compliance, and speed.**
