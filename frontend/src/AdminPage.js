@@ -50,6 +50,7 @@ function AdminPage({ darkMode }) {
   
   // Audit state
   const [auditLogs, setAuditLogs] = useState([]);
+  const [auditTotal, setAuditTotal] = useState(0);
   const [userSessions, setUserSessions] = useState([]);
   const [sessionReasons, setSessionReasons] = useState({}); // Map sessionId -> reason string
   const [auditLoading, setAuditLoading] = useState(false);
@@ -139,6 +140,8 @@ function AdminPage({ darkMode }) {
       });
       const data = await response.json();
       setAuditLogs(data.logs || []);
+      if (data.pagination?.total !== undefined) setAuditTotal(data.pagination.total);
+      setAuditPage(page);
     } catch (error) {
       console.error('Error fetching audit logs:', error);
     } finally {
@@ -492,6 +495,21 @@ function AdminPage({ darkMode }) {
                 </TableBody>
               </Table>
             </TableContainer>
+          )}
+          {!auditLoading && auditLogs.length > 0 && (
+            <Box display="flex" justifyContent="space-between" alignItems="center" mt={2}>
+              <Typography variant="caption" color="text.secondary">
+                Page {auditPage} • Showing {auditLogs.length} of {auditTotal || '…'} (50 per page)
+              </Typography>
+              <Pagination
+                count={Math.max(1, Math.ceil((auditTotal || 0) / 50))}
+                page={auditPage}
+                onChange={(_, p) => fetchAuditLogs(p)}
+                size="small"
+                showFirstButton
+                showLastButton
+              />
+            </Box>
           )}
         </Paper>
       )}

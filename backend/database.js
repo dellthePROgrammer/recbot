@@ -304,6 +304,14 @@ const statements = {
     ORDER BY action_timestamp DESC 
     LIMIT ? OFFSET ?
   `),
+  countAuditLogs: db.prepare(`
+    SELECT COUNT(*) as total FROM audit_logs
+    WHERE (? IS NULL OR user_id = ?)
+      AND (? IS NULL OR action_type = ?)
+      AND (? IS NULL OR DATE(action_timestamp) >= ?)
+      AND (? IS NULL OR DATE(action_timestamp) <= ?)
+      AND (? IS NULL OR call_id LIKE '%' || ? || '%')
+  `),
   
   getUserSessions: db.prepare(`
     SELECT * FROM user_sessions 
@@ -706,7 +714,7 @@ export function logAuditEvent(userId, userEmail, actionType, filePath = null, fi
 
 export function getAuditLogs(userId = null, actionType = null, startDate = null, endDate = null, callId = null, limit = 100, offset = 0) {
   try {
-    return statements.getAuditLogs.all(
+    const rows = statements.getAuditLogs.all(
       userId, userId,
       actionType, actionType,
       startDate, startDate,
@@ -714,9 +722,17 @@ export function getAuditLogs(userId = null, actionType = null, startDate = null,
       callId, callId,
       limit, offset
     );
+    const { total } = statements.countAuditLogs.get(
+      userId, userId,
+      actionType, actionType,
+      startDate, startDate,
+      endDate, endDate,
+      callId, callId
+    );
+    return { rows, total };
   } catch (error) {
     console.error('Error getting audit logs:', error);
-    return [];
+    return { rows: [], total: 0 };
   }
 }
 

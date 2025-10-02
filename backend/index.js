@@ -930,12 +930,12 @@ app.get('/api/audit-logs', requireAuth, ensureSession, requireAdmin, (req, res) 
       offset = 0
     } = req.query;
 
-    const auditLogs = getAuditLogs(
+    const { rows: auditLogs, total } = getAuditLogs(
       userId || null,
       actionType || null,
       startDate || null,
       endDate || null,
-      callId || null, // LIKE filtering handled in prepared statement
+      callId || null,
       parseInt(limit),
       parseInt(offset)
     );
@@ -943,9 +943,10 @@ app.get('/api/audit-logs', requireAuth, ensureSession, requireAdmin, (req, res) 
     res.json({
       logs: auditLogs,
       pagination: {
+        total,
         limit: parseInt(limit),
         offset: parseInt(offset),
-        hasMore: auditLogs.length === parseInt(limit)
+        hasMore: parseInt(offset) + auditLogs.length < total
       }
     });
   } catch (err) {
