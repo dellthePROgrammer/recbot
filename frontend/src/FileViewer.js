@@ -122,7 +122,7 @@ function FileViewer({ darkMode }) {
     
   url += `&offset=${offset}&limit=${limit}`;
   if (callIdFilter) url += `&callId=${encodeURIComponent(callIdFilter.trim())}`;
-    url += `&sortBy=${customSortColumn || sortColumn}&sortOrder=${customSortDirection || sortDirection}`;
+    url += `&sortColumn=${customSortColumn || sortColumn}&sortDirection=${customSortDirection || sortDirection}`;
     
     if (customDurationMin !== null && customDurationMin !== "") {
       url += `&durationMin=${encodeURIComponent(customDurationMin)}`;
@@ -197,11 +197,12 @@ function FileViewer({ darkMode }) {
   }, [callIdFilter]);
 
   const handleSort = (column) => {
-    const isAsc = sortColumn === column && sortDirection === "asc";
+    const normalized = column === 'duration' ? 'durationMs' : column;
+    const isAsc = sortColumn === normalized && sortDirection === "asc";
     const newDirection = isAsc ? "desc" : "asc";
-    setSortColumn(column);
+    setSortColumn(normalized);
     setSortDirection(newDirection);
-    fetchFiles(calendarDateStart, calendarDateEnd, 0, filesPerPage, column, newDirection);
+    fetchFiles(calendarDateStart, calendarDateEnd, 0, filesPerPage, normalized, newDirection);
   };
 
   const handlePageChange = (event, value) => {
@@ -1201,9 +1202,9 @@ function FileViewer({ darkMode }) {
                     </TableCell>
                     <TableCell>
                       <TableSortLabel
-                        active={sortColumn === 'duration'}
-                        direction={sortColumn === 'duration' ? sortDirection : 'asc'}
-                        onClick={() => handleSort('duration')}
+                        active={sortColumn === 'durationMs'}
+                        direction={sortColumn === 'durationMs' ? sortDirection : 'asc'}
+                        onClick={() => handleSort('durationMs')}
                       >
                         Duration
                       </TableSortLabel>
