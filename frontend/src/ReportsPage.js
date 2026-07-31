@@ -204,6 +204,8 @@ export default function ReportsPage(){
   const [startDate,setStartDate]=useState(null);
   const [endDate,setEndDate]=useState(null);
   const [page,setPage]=useState(1); const [pageSize,setPageSize]=useState(50); const [total,setTotal]=useState(0);
+  // The API caps the row count and only computes it on page 1; totalCapped means "at least this many".
+  const [totalCapped,setTotalCapped]=useState(false);
   const [sortOrder,setSortOrder]=useState('desc');
   const [initialized,setInitialized]=useState(false);
   const [reportExporting,setReportExporting]=useState(false);
@@ -308,7 +310,12 @@ export default function ReportsPage(){
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Failed');
       setRows(json.rows || []);
-      setTotal(json.total || 0);
+      // total is null on pages 2+ — the backend skips the count there, and any
+      // filter change resets us to page 1, so the value we already hold is current.
+      if (json.total !== null && json.total !== undefined) {
+        setTotal(json.total);
+        setTotalCapped(!!json.totalCapped);
+      }
       if (json.returnedRange) console.log('[Reports] Returned range:', json.returnedRange, 'Sort:', json.sort);
       if (json.legacyStats) console.log('[Reports] Legacy timestamp rows remaining:', json.legacyStats.total, json.legacyStats.samples);
     } catch (e) {
@@ -652,7 +659,7 @@ export default function ReportsPage(){
           </Select>
         </FormControl>
       </Stack>
-      <Typography variant="caption">{total} rows</Typography>
+      <Typography variant="caption">{total.toLocaleString()}{totalCapped ? '+' : ''} rows</Typography>
     </Box>
 
   </Container>;

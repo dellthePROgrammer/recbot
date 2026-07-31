@@ -22,6 +22,31 @@ const AUDIT_EXPORT_MAX_ROWS = parsePositiveInt(process.env.AUDIT_EXPORT_MAX_ROWS
 const REPORT_EXPORT_MAX_ROWS = parsePositiveInt(process.env.REPORT_EXPORT_MAX_ROWS, 5000);
 const USER_USAGE_EXPORT_MAX_ROWS = parsePositiveInt(process.env.USER_USAGE_EXPORT_MAX_ROWS, 5000);
 
+// Upper bound on the pagination COUNT(*). Without it a broad filter (a whole
+// month with no phone number) counts millions of rows on every page-1 request.
+// We count to CAP + 1 so "exactly CAP" is distinguishable from "more than CAP".
+const REPORT_COUNT_CAP = parsePositiveInt(process.env.REPORT_COUNT_CAP, 10000);
+
+// Phone numbers arrive from Five9 in whatever shape the carrier sent
+// (5551234567, +15551234567, (555) 123-4567), so both the index and the
+// predicate normalize to the last 10 digits before comparing.
+//
+// This expression is the *definition* of idx_reporting_{ani,dnis}_last10.
+// Postgres matches an expression index by the parsed expression tree, so it
+// must stay in lockstep with what backend/scripts/optimize-reporting-indexes.mjs
+// builds — same functions, same arguments, same order. Any drift silently
+// disables the index and the seq scans come back.
+const phoneLast10Expr = (column) => `right(regexp_replace(coalesce(${column}, ''), '[^0-9]', '', 'g'), 10)`;
+
+// Below this many digits we can't use the last-10 index and fall back to a
+// trigram-backed substring LIKE.
+const PHONE_EXACT_MIN_DIGITS = 7;
+
+function phoneDigits(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).replace(/[^0-9]/g, '');
+}
+
 export function normalizeReportTimestamp(raw) {
   if (raw === null || raw === undefined) return null;
   const trimmed = typeof raw === 'string' ? raw.trim() : String(raw).trim();
@@ -121,6 +146,46 @@ pool.on('connect', (client) => {
     console.error('PostgreSQL client connection error (handled):', err.message);
   });
 });
+
+// Indexes backing the phone filter. On a fresh or small install these build
+// instantly, so we create them inline. On an established table they take
+// minutes and a plain CREATE INDEX holds a write lock for the duration —
+// which would stall the container past its healthcheck start_period — so
+// above the threshold we skip and point at the CONCURRENTLY script instead.
+const PHONE_INDEX_INLINE_ROW_LIMIT = 100_000;
+
+async function createPhoneSearchIndexes() {
+  // reltuples is the planner's estimate, updated by ANALYZE — free to read,
+  // no scan. It is -1 on a table that has never been analyzed.
+  let estimate = 0;
+  try {
+    const { rows } = await pool.query(`SELECT reltuples::bigint AS estimate FROM pg_class WHERE relname = 'reporting'`);
+    estimate = Number(rows[0]?.estimate ?? 0);
+  } catch (e) {
+    console.warn('[REPORTING] Could not estimate reporting size:', e.message);
+  }
+
+  if (estimate > PHONE_INDEX_INLINE_ROW_LIMIT) {
+    console.warn(`[REPORTING] Skipping inline phone index creation (~${estimate.toLocaleString('en-US')} rows).`);
+    console.warn('[REPORTING] Build them without locking writes by running:');
+    console.warn('[REPORTING]   node scripts/optimize-reporting-indexes.mjs');
+    return;
+  }
+
+  try {
+    await pool.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm;`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_reporting_ani_last10 ON reporting (${phoneLast10Expr('ani')});`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_reporting_dnis_last10 ON reporting (${phoneLast10Expr('dnis')});`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_reporting_ani_trgm ON reporting USING gin (ani gin_trgm_ops);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_reporting_dnis_trgm ON reporting USING gin (dnis gin_trgm_ops);`);
+  } catch (e) {
+    // Creating an extension needs superuser on some managed Postgres hosts.
+    // Without the indexes phone search still returns correct results, just
+    // slowly, so this must not take the app down at boot.
+    console.warn('[REPORTING] Phone search index creation failed:', e.message);
+    console.warn('[REPORTING] Phone lookups will fall back to sequential scans.');
+  }
+}
 
 // ============================================================
 // Database Initialization (must be called at startup)
@@ -233,8 +298,9 @@ export async function initializeDatabase() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_composite ON files(call_date, phone, email);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_call_id ON files(call_id);`);
 
+  // No DESC twin for idx_reporting_timestamp — a b-tree scans backward natively,
+  // so the duplicate only cost write throughput on every ingest batch.
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_reporting_timestamp ON reporting(timestamp);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_reporting_timestamp_desc ON reporting(timestamp DESC);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_reporting_agent ON reporting(agent);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_reporting_agent_name ON reporting(agent_name);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_reporting_campaign ON reporting(campaign);`);
@@ -244,6 +310,8 @@ export async function initializeDatabase() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_reporting_customer_name ON reporting(customer_name);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_reporting_disposition ON reporting(disposition);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_call_disposition ON files(call_disposition);`);
+
+  await createPhoneSearchIndexes();
 
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_sessions_login_time ON user_sessions(login_time);`);
@@ -1371,7 +1439,20 @@ function buildReportWhereClause(params, { start, end, agent, agentName, campaign
   if (campaign) { conditions.push(`${p}campaign = $${paramIdx++}`); params.push(campaign); }
   if (callType) { conditions.push(`${p}call_type = $${paramIdx++}`); params.push(callType); }
   if (disposition) { conditions.push(`${p}disposition = $${paramIdx++}`); params.push(disposition); }
-  if (phone) { conditions.push(`(${p}ani LIKE '%' || $${paramIdx} || '%' OR ${p}dnis LIKE '%' || $${paramIdx} || '%')`); params.push(phone); paramIdx++; }
+  if (phone) {
+    // A full number matches on normalized digits (indexed equality, and it
+    // ignores +1 / dashes / parens). Anything shorter keeps the original
+    // substring behaviour, which the trigram indexes now serve.
+    const digits = phoneDigits(phone);
+    if (digits.length >= PHONE_EXACT_MIN_DIGITS) {
+      conditions.push(`(${phoneLast10Expr(`${p}ani`)} = $${paramIdx} OR ${phoneLast10Expr(`${p}dnis`)} = $${paramIdx})`);
+      params.push(digits.slice(-10));
+    } else {
+      conditions.push(`(${p}ani LIKE '%' || $${paramIdx} || '%' OR ${p}dnis LIKE '%' || $${paramIdx} || '%')`);
+      params.push(phone);
+    }
+    paramIdx++;
+  }
   if (callId) { conditions.push(`${p}call_id LIKE '%' || $${paramIdx++} || '%'`); params.push(callId); }
   if (customerName) { conditions.push(`${p}customer_name LIKE '%' || $${paramIdx++} || '%'`); params.push(customerName); }
   if (afterCallWork !== null && afterCallWork !== undefined) { conditions.push(`${p}after_call_work_time >= $${paramIdx++}`); params.push(afterCallWork); }
@@ -1404,61 +1485,77 @@ export async function queryReports({ start = null, end = null, agent = null, age
       afterCallWork: acw, transfers: tr, conferences: conf, abandoned: ab
     };
 
-    // Build WHERE clause with "r." alias for the JOIN query
+    // Build WHERE clause with "r." alias for the data query
     const dataParams = [];
-    const joinWhereClause = buildReportWhereClause(dataParams, filterArgs, { alias: 'r' });
+    let dataWhereClause = buildReportWhereClause(dataParams, filterArgs, { alias: 'r' });
 
     // Build a second WHERE clause without alias for the COUNT query
     const countParams = [];
-    const countWhereClause = buildReportWhereClause(countParams, filterArgs);
+    let countWhereClause = buildReportWhereClause(countParams, filterArgs);
+
+    // hasRecording: a semi-join against files, not a LEFT JOIN. The previous
+    // "LEFT JOIN (SELECT DISTINCT call_id FROM files)" could not be inlined by
+    // the planner, so the full distinct set was materialized on every request
+    // and the ORDER BY ... LIMIT could not stream off the timestamp index.
+    const recordingExists = (alias) => `EXISTS (SELECT 1 FROM files WHERE files.call_id = ${alias}.call_id)`;
+    const appendCondition = (clause, condition) => (clause ? `${clause} AND ${condition}` : `WHERE ${condition}`);
+
+    if (hr === 1) {
+      dataWhereClause = appendCondition(dataWhereClause, recordingExists('r'));
+      countWhereClause = appendCondition(countWhereClause, recordingExists('reporting'));
+    } else if (hr === 0) {
+      dataWhereClause = appendCondition(dataWhereClause, `NOT ${recordingExists('r')}`);
+      countWhereClause = appendCondition(countWhereClause, `NOT ${recordingExists('reporting')}`);
+    }
 
     const paramIdx = dataParams.length + 1;
     dataParams.push(limit, offset);
 
     // Explicit column list — exclude raw_json (large TEXT blob, only needed for hydration
     // which we now do selectively) and recordings (rarely needed in list views).
-    // LEFT JOIN files to compute hasRecording in-query instead of a separate round-trip.
     const reportCols = `r.call_id, r.timestamp, r.campaign, r.call_type, r.agent, r.agent_name,
       r.disposition, r.ani, r.customer_name, r.dnis, r.call_time, r.bill_time_rounded,
       r.cost, r.ivr_time, r.queue_wait_time, r.ring_time, r.talk_time, r.hold_time,
       r.park_time, r.after_call_work_time, r.transfers, r.conferences, r.holds,
       r.abandoned, r.created_at,
-      CASE WHEN f.call_id IS NOT NULL THEN true ELSE false END AS "hasRecording"`;
-
-    // hasRecording filter: applied after the LEFT JOIN
-    let hasRecordingJoinCondition = '';
-    if (hr === 1) {
-      hasRecordingJoinCondition = joinWhereClause ? ' AND f.call_id IS NOT NULL' : ' WHERE f.call_id IS NOT NULL';
-    } else if (hr === 0) {
-      hasRecordingJoinCondition = joinWhereClause ? ' AND f.call_id IS NULL' : ' WHERE f.call_id IS NULL';
-    }
+      ${recordingExists('r')} AS "hasRecording"`;
 
     const dataQuery = `SELECT ${reportCols}
       FROM reporting r
-      LEFT JOIN (SELECT DISTINCT call_id FROM files WHERE call_id IS NOT NULL) f ON f.call_id = r.call_id
-      ${joinWhereClause}${hasRecordingJoinCondition}
+      ${dataWhereClause}
       ORDER BY r.timestamp ${sortDir} LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`;
 
-    // Count query: use EXISTS/NOT EXISTS for hasRecording filter
-    let countHasRecording = '';
-    if (hr === 1) {
-      countHasRecording = (countWhereClause ? ' AND ' : ' WHERE ') + 'EXISTS (SELECT 1 FROM files WHERE files.call_id = reporting.call_id)';
-    } else if (hr === 0) {
-      countHasRecording = (countWhereClause ? ' AND ' : ' WHERE ') + 'NOT EXISTS (SELECT 1 FROM files WHERE files.call_id = reporting.call_id)';
-    }
-    const countQuery = `SELECT COUNT(*) as total FROM reporting ${countWhereClause}${countHasRecording}`;
+    // The count is the expensive half of this request: LIMIT bounds the data
+    // query, but nothing bounds a COUNT(*). Two mitigations:
+    //   1. Only count on the first page. ReportsPage resets to page 1 whenever
+    //      a filter changes, so while paging the client's cached total is still
+    //      correct for the current filter set.
+    //   2. Stop counting at the cap, so a broad filter can never walk millions
+    //      of rows. Counting to CAP + 1 tells "exactly CAP" from "more".
+    const shouldCount = offset === 0;
+    const countQuery = `SELECT COUNT(*) as total FROM (
+        SELECT 1 FROM reporting ${countWhereClause} LIMIT ${REPORT_COUNT_CAP + 1}
+      ) t`;
 
     const [dataResult, countResult] = await Promise.all([
       pool.query(dataQuery, dataParams),
-      pool.query(countQuery, countParams)
+      shouldCount ? pool.query(countQuery, countParams) : Promise.resolve(null)
     ]);
 
-    const total = parseInt(countResult.rows[0].total, 10);
-    console.log(`[QUERY REPORTS] Results: returned ${dataResult.rows.length} rows, total=${total}`);
-    return { rows: dataResult.rows, total, sort: sort === 'asc' ? 'asc' : 'desc' };
+    // null total means "unchanged since page 1" — the caller keeps its value.
+    let total = null;
+    let totalCapped = false;
+    if (countResult) {
+      const counted = parseInt(countResult.rows[0].total, 10);
+      totalCapped = counted > REPORT_COUNT_CAP;
+      total = totalCapped ? REPORT_COUNT_CAP : counted;
+    }
+
+    console.log(`[QUERY REPORTS] Results: returned ${dataResult.rows.length} rows, total=${total === null ? 'skipped' : total}${totalCapped ? '+ (capped)' : ''}`);
+    return { rows: dataResult.rows, total, totalCapped, sort: sort === 'asc' ? 'asc' : 'desc' };
   } catch (e) {
     console.error('Failed to query reports', e);
-    return { rows: [], total: 0 };
+    return { rows: [], total: 0, totalCapped: false };
   }
 }
 
@@ -1489,12 +1586,23 @@ export async function exportReports({ start = null, end = null, agent = null, ag
     } else if (hr === 0) {
       countHasRecording = (whereClause ? ' AND ' : ' WHERE ') + 'NOT EXISTS (SELECT 1 FROM files WHERE files.call_id = reporting.call_id)';
     }
-    const countResult = await pool.query(`SELECT COUNT(*) as total FROM reporting ${whereClause}${countHasRecording}`, params);
-    const total = parseInt(countResult.rows[0].total, 10);
 
-    if (total > maxRows) {
-      return { rows: [], total, truncated: true, maxRows, sort: sort === 'asc' ? 'asc' : 'desc' };
+    // This count only decides whether the export exceeds maxRows, so stop at
+    // maxRows + 1. An unbounded COUNT(*) here would scan the whole table just
+    // to tell the caller a number we then refuse to act on.
+    const countResult = await pool.query(
+      `SELECT COUNT(*) as total FROM (
+         SELECT 1 FROM reporting ${whereClause}${countHasRecording} LIMIT ${maxRows + 1}
+       ) t`,
+      params
+    );
+    const counted = parseInt(countResult.rows[0].total, 10);
+
+    if (counted > maxRows) {
+      // total is not the true row count — only "more than maxRows".
+      return { rows: [], total: null, truncated: true, maxRows, sort: sort === 'asc' ? 'asc' : 'desc' };
     }
+    const total = counted;
 
     const dataResult = await pool.query(
       `SELECT * FROM reporting ${whereClause}${countHasRecording} ORDER BY timestamp ${sortDir}`,

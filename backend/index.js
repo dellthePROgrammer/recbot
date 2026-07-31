@@ -632,7 +632,9 @@ app.get('/api/reports', requireAuth, ensureSession, async (req, res) => {
           },
           pagination: { limit: appliedLimit, offset: appliedOffset, sort: sortDir },
                     returned: hydratedRows ? hydratedRows.length : 0,
-          total: result.total || 0,
+          // null when the count was skipped (page 2+) — don't record that as a real zero
+          total: result.total ?? null,
+          totalCapped: result.totalCapped || false,
           appliedRange: { start: appliedStart, end: appliedEnd },
           returnedRange,
           legacyTotal: legacyStats ? legacyStats.total : undefined
@@ -751,9 +753,10 @@ app.get('/api/reports/export', requireAuth, ensureSession, requireManagerOrAdmin
     }
 
     if (exportResult.truncated) {
+      // The count stops at maxRows + 1, so we know it's over the limit but not by how much.
       return res.status(400).json({
-        error: `Too many matching report rows (${exportResult.total}). Narrow your filters to export fewer than ${exportResult.maxRows} rows.`,
-        total: exportResult.total,
+        error: `Too many matching report rows (more than ${exportResult.maxRows}). Narrow your filters to export fewer than ${exportResult.maxRows} rows.`,
+        total: null,
         maxRows: exportResult.maxRows
       });
     }
