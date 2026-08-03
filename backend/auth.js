@@ -74,6 +74,12 @@ export const ROLE_NAMES = {
   member: ROLE_NAME_MEMBER,
 };
 
+// Whether the role-name fallback is active. Also exposed via /api/config: the
+// frontend gate MUST use the same rule, otherwise a user with a matching role
+// name but no permission scope passes the UI gate and then gets 403 on every
+// API call — which is a broken app, not a clear "not authorized" screen.
+export const USE_ROLE_NAMES = /^true$/i.test(process.env.LOGTO_USE_ROLE_NAMES || '');
+
 function roleFromRoleNames(roles) {
   if (!Array.isArray(roles)) return null;
   const lower = roles.map(r => String(r?.name ?? r).toLowerCase());
@@ -322,9 +328,8 @@ export const requireAuth = async (req, res, next) => {
     // The frontend re-authorizes against Logto on each load to mint a token with
     // current scopes, so permission changes apply on refresh. Role NAMES are an
     // opt-in fallback only (LOGTO_USE_ROLE_NAMES=true).
-    const useRoleNames = /^true$/i.test(process.env.LOGTO_USE_ROLE_NAMES || '');
     const role = roleFromScopes(payload.scope)
-      || (useRoleNames ? roleFromRoleNames(roleNames) : null)
+      || (USE_ROLE_NAMES ? roleFromRoleNames(roleNames) : null)
       || null;
 
     // No recbot role/permission => not authorized to use the application.

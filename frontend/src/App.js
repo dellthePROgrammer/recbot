@@ -95,6 +95,68 @@ function matchesAllowedIdentifier(email, identifier) {
 
 const ENV_ALLOWED_LOGIN_CONFIG = normalizeAllowedLoginConfig(process.env.REACT_APP_ALLOWED_LOGIN_IDENTIFIERS);
 
+// Last-resort safety net. Without this, ANY exception thrown while rendering
+// unmounts the whole React tree and the user sees a blank white page with no
+// hint of what went wrong. Show the error plus the two recoveries that actually
+// help: reload, or clear the cached auth state and start over.
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error('Unhandled render error:', error, info?.componentStack);
+  }
+
+  handleReset = () => {
+    // Stale/partial auth state is the common cause, so clear it before reloading.
+    try {
+      sessionStorage.clear();
+      localStorage.removeItem('darkMode');
+    } catch (e) {
+      // storage unavailable — reload anyway
+    }
+    window.location.replace('/');
+  };
+
+  render() {
+    const { error } = this.state;
+    if (!error) return this.props.children;
+
+    return (
+      <Container maxWidth="sm" sx={{ mt: 8 }}>
+        <Paper sx={{ p: 4 }}>
+          <Typography variant="h5" gutterBottom>Something went wrong</Typography>
+          <Typography variant="body2" color="text.secondary" paragraph>
+            The page failed to load. Reloading usually fixes it. If it keeps
+            happening, sign out and back in, or contact your administrator.
+          </Typography>
+          <Typography
+            variant="caption"
+            component="pre"
+            sx={{ whiteSpace: 'pre-wrap', color: 'text.secondary', mb: 3 }}
+          >
+            {error.message || String(error)}
+          </Typography>
+          <Box sx={{ display: 'flex', gap: 2 }}>
+            <Button variant="contained" size="small" onClick={() => window.location.reload()}>
+              Reload
+            </Button>
+            <Button variant="outlined" size="small" onClick={this.handleReset}>
+              Reset session
+            </Button>
+          </Box>
+        </Paper>
+      </Container>
+    );
+  }
+}
+
 // Small reusable sign-out button for the access-denied / unverified screens.
 function SignOutButton({ children = 'Sign out' }) {
   const { signOut } = useLogto();
@@ -402,6 +464,8 @@ function LogtoConfigLoader() {
           // live source (token `roles` claim); roleScopes kept for compatibility.
           if (data.roleScopes) window.__RECBOT_ROLE_SCOPES__ = data.roleScopes;
           if (data.roleNames) window.__RECBOT_ROLE_NAMES__ = data.roleNames;
+          // Match the backend's role-name fallback setting exactly (see auth.js).
+          window.__RECBOT_USE_ROLE_NAMES__ = data.useRoleNames === true;
 
           const serverAllowedConfig = data.allowedLoginConfig
             ? normalizeAllowedLoginConfig(
@@ -473,7 +537,11 @@ function LogtoConfigLoader() {
 }
 
 function App() {
-  return <LogtoConfigLoader />;
+  return (
+    <ErrorBoundary>
+      <LogtoConfigLoader />
+    </ErrorBoundary>
+  );
 }
 
 export default App;

@@ -126,6 +126,13 @@ function AdminPage({ darkMode }) {
           'Authorization': `Bearer ${await getToken()}`
         }
       });
+      // On 401/403/500 the body is an error object, not stats — storing it would
+      // render `undefined.toLocaleString()` below and blank the page.
+      if (!response.ok) {
+        console.error(`Error fetching database stats: HTTP ${response.status}`);
+        setDbStats(null);
+        return;
+      }
       const stats = await response.json();
       setDbStats(stats);
     } catch (error) {
@@ -412,7 +419,7 @@ function AdminPage({ darkMode }) {
       {currentTab === 0 && (
         <Paper elevation={1} sx={{ p: 3, mb: 3, backgroundColor: darkMode ? 'grey.900' : 'grey.50' }}>
           <Typography variant="h6" gutterBottom>
-            Database Management - Scale: {dbStats ? `${dbStats.totalFiles.toLocaleString()} files` : 'Loading...'}
+            Database Management - Scale: {dbStats ? `${(Number(dbStats.totalFiles) || 0).toLocaleString()} files` : 'Loading...'}
           </Typography>
           
           {dbStats && (

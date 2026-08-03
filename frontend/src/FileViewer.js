@@ -143,6 +143,9 @@ function FileViewer({ darkMode }) {
   // once per page load/refresh rather than on every fetch.
   const loggedViewRef = React.useRef(true);
   const [error500, setError500] = useState(false);
+  // Specific message for the error banner (auth/permission failures say why);
+  // empty falls back to the generic server-error text.
+  const [errorMessage, setErrorMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [filesPerPage, setFilesPerPage] = useState(25);
   const [totalCount, setTotalCount] = useState(0);
@@ -161,7 +164,8 @@ function FileViewer({ darkMode }) {
     if (!start) return;
     setLoading(true);
     setError500(false);
-    
+    setErrorMessage("");
+
     let url = `/api/wav-files?dateStart=${encodeURIComponent(dayjs(start).format("M_D_YYYY"))}`;
     if (end) url += `&dateEnd=${encodeURIComponent(dayjs(end).format("M_D_YYYY"))}`;
     
@@ -223,17 +227,32 @@ function FileViewer({ darkMode }) {
     };
 
     makeRequest()
-      .then((res) => {
-        if (res.status === 500) {
-          setError500(true);
-          return { files: [], totalCount: 0, hasMore: false };
+      .then(async (res) => {
+        if (res.ok) return res.json();
+
+        // Error responses carry a JSON error body ({ error, message }), NOT a
+        // file list. Returning it as data used to put `undefined` into
+        // totalCount, which then threw in render (blank page). Always fall back
+        // to an empty result set and show why.
+        setError500(true);
+        if (res.status === 401 || res.status === 403) {
+          let message = res.status === 401
+            ? 'Your session has expired. Please sign out and sign in again.'
+            : 'You do not have permission to view recordings. Please contact your administrator.';
+          try {
+            const body = await res.json();
+            if (body?.message || body?.error) message = body.message || body.error;
+          } catch (e) {
+            // non-JSON body — keep the default message
+          }
+          setErrorMessage(message);
         }
-        return res.json();
+        return { files: [], totalCount: 0, hasMore: false };
       })
       .then((data) => {
         setFiles((data.files || []).map(normalizeFile));
-        setTotalCount(data.totalCount);
-        setHasMore(data.hasMore);
+        setTotalCount(Number(data.totalCount) || 0);
+        setHasMore(Boolean(data.hasMore));
         setCurrentOffset(offset);
       })
       .catch((err) => {
@@ -1412,7 +1431,7 @@ function FileViewer({ darkMode }) {
         {/* Results and pagination controls */}
         <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
           <Typography variant="body2" color="text.secondary">
-            {loading ? "Loading..." : `Showing ${files.length} of ${totalCount.toLocaleString()} files`}
+            {loading ? "Loading..." : `Showing ${files.length} of ${(Number(totalCount) || 0).toLocaleString()} files`}
           </Typography>
           <Box display="flex" alignItems="center" gap={2}>
             <FormControl size="small">
@@ -1430,7 +1449,9 @@ function FileViewer({ darkMode }) {
         {error500 && (
           <Paper sx={{ p: 2, mb: 2, backgroundColor: 'error.light' }}>
             <Typography color="error.contrastText">
-              ❌ Server error occurred. Please try again or contact support.
+              {errorMessage
+                ? `🚫 ${errorMessage}`
+                : '❌ Server error occurred. Please try again or contact support.'}
             </Typography>
           </Paper>
         )}
@@ -1560,7 +1581,7 @@ function FileViewer({ darkMode }) {
 
             <Box display="flex" justifyContent="center">
               <Pagination
-                count={Math.ceil(totalCount / filesPerPage)}
+                count={Math.max(1, Math.ceil((Number(totalCount) || 0) / filesPerPage))}
                 page={Math.floor(currentOffset / filesPerPage) + 1}
                 onChange={handlePageChange}
                 color="primary"

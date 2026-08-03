@@ -61,6 +61,15 @@ function getRoleNames() {
   return (typeof window !== 'undefined' && window.__RECBOT_ROLE_NAMES__) || DEFAULT_ROLE_NAMES;
 }
 
+// Whether the role-NAME fallback is enabled server-side (LOGTO_USE_ROLE_NAMES).
+// Must match the backend: if we resolve a role from role names while the backend
+// doesn't, the user passes this gate and then gets 403 on every API request —
+// which renders as a broken app instead of the "Not Authorized" screen.
+// Defaults to false, matching the backend default.
+function useRoleNamesFallback() {
+  return typeof window !== 'undefined' && window.__RECBOT_USE_ROLE_NAMES__ === true;
+}
+
 // Map Logto role names to the app's role (admin/manager/member), or undefined.
 function roleFromRoleNames(roles) {
   if (!Array.isArray(roles)) return undefined;
@@ -82,7 +91,7 @@ function roleFromAccessToken(token) {
   if (scopes.includes(map.admin)) return 'admin';
   if (scopes.includes(map.manager)) return 'manager';
   if (scopes.includes(map.member)) return 'member';
-  return roleFromRoleNames(payload?.roles);
+  return useRoleNamesFallback() ? roleFromRoleNames(payload?.roles) : undefined;
 }
 
 // Shape Logto userinfo claims into the subset of Clerk's user object the app uses.

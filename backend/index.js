@@ -22,7 +22,7 @@ import http from 'http';
 import https from 'https';
 import { initializeDatabase, pool, queryFiles, indexFiles, indexFile, getDatabaseStats, getAuditLogs, getUserSessions, logAuditEvent, parseFileMetadata, logUserLogout, logUserSession, getDistinctUsers, expireStaleSessions, touchUserSession, expireInactiveSessions, repairOpenSessions, backfillExpiredOpenSessions, backfillFileMetadata, backfillAuditLogCallIds, queryReports, exportReports, getReportingSummary, getDistinctCampaigns, getDistinctCallTypes, getDistinctDispositions, getDistinctFileDispositions, exportAuditLogs, getUserUsageReport, exportUserUsageReport, normalizeReportTimestamp, getLegacyReportTimestampStats, rewriteReportTimestamps, getCallIdsWithRecordings } from './database.js';
 import { fetchLastHourCallLog, scheduleRecurringIngestion } from './five9.js';
-import { logtoAuth, requireAuth, requireAdmin, requireMemberOrAdmin, requireAuthenticatedUser, requireManagerOrAdmin, allowedLoginConfig, ROLE_SCOPES, ROLE_NAMES } from './auth.js';
+import { logtoAuth, requireAuth, requireAdmin, requireMemberOrAdmin, requireAuthenticatedUser, requireManagerOrAdmin, allowedLoginConfig, ROLE_SCOPES, ROLE_NAMES, USE_ROLE_NAMES } from './auth.js';
 
 dayjs.extend(customParseFormat);
 dayjs.extend(isSameOrBefore);
@@ -889,8 +889,11 @@ app.get('/api/config', (req, res) => {
     // scope -> role mapping, and the list of permission scopes the SPA should request
     roleScopes: ROLE_SCOPES,
     apiScopes: Object.values(ROLE_SCOPES),
-    // role-name -> app-role mapping (the live source: token `roles` claim)
+    // role-name -> app-role mapping (fallback source: token `roles` claim), and
+    // whether that fallback is enabled — the frontend gate must match the
+    // backend exactly or users pass the UI gate and then get 403 on every call.
     roleNames: ROLE_NAMES,
+    useRoleNames: USE_ROLE_NAMES,
     allowedLoginConfig: {
       allowAll: allowedLoginConfig.allowAll,
       entries: Array.isArray(allowedLoginConfig.entries) ? [...allowedLoginConfig.entries] : []
